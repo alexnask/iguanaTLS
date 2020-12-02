@@ -1,10 +1,11 @@
 const std = @import("std");
-const testing = std.testing;
+pub const x509 = @import("x509.zig");
 
-export fn add(a: i32, b: i32) i32 {
-    return a + b;
+comptime {
+    std.testing.refAllDecls(x509);
 }
 
-test "basic add functionality" {
-    testing.expect(add(3, 7) == 10);
-}
+// @TODO Document the notion of sub-streams somewhere
+// Only valid to read when one of them is alive, but
+// you dont need to consume all of it to start reading
+// from the next.
