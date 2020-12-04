@@ -36,6 +36,16 @@ pub const PublicKey = union(enum) {
         /// Public curve point (uncompressed format)
         curve_point: []const u8,
     },
+
+    pub fn deinit(self: @This(), alloc: *Allocator) void {
+        switch (self) {
+            .rsa => |rsa| {
+                alloc.free(rsa.modulus);
+                alloc.free(rsa.exponent);
+            },
+            .ec => |ec| alloc.free(ec.curve_point),
+        }
+    }
 };
 
 pub fn DecodeDERError(comptime Reader: type) type {
@@ -59,6 +69,8 @@ pub const TrustedAnchor = struct {
     const CaptureState = struct {
         self: *TrustedAnchor,
         allocator: *Allocator,
+        dn_allocated: bool = false,
+        pk_allocated: bool = false,
     };
     fn initSubjectDn(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
         const dn_mem = try state.allocator.alloc(u8, length);
@@ -66,6 +78,7 @@ pub const TrustedAnchor = struct {
         if ((try reader.readAll(dn_mem)) != length)
             return error.EndOfStream;
         state.self.dn = dn_mem;
+        state.dn_allocated = true;
     }
 
     fn processExtension(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
@@ -145,6 +158,7 @@ pub const TrustedAnchor = struct {
                         .exponent = exponent.int.limbs,
                     },
                 };
+                state.pk_allocated = true;
             }
             return;
         }
@@ -185,6 +199,7 @@ pub const TrustedAnchor = struct {
             if (ec_bit_string != .bit_string or ec_bit_string.bit_string.bit_len % 8 != 0)
                 return error.DoesNotMatchSchema;
             state.self.public_key.ec.curve_point = ec_bit_string.bit_string.data;
+            state.pk_allocated = true;
             return;
         }
         return error.DoesNotMatchSchema;
@@ -192,7 +207,6 @@ pub const TrustedAnchor = struct {
 
     /// Initialize a trusted anchor from distinguished encoding rules (DER) encoded data
     pub fn create(allocator: *Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
-        // @TODO How to gracefully free memory from here? Boolean flags in capture state?
         var self: @This() = undefined;
         self.is_ca = false;
         // https://tools.ietf.org/html/rfc5280#page-117
@@ -231,6 +245,13 @@ pub const TrustedAnchor = struct {
             &capture_state, initExtensions,
         };
 
+        errdefer {
+            if (capture_state.dn_allocated)
+                allocator.free(self.dn);
+            if (capture_state.pk_allocated)
+                self.public_key.deinit(allocator);
+        }
+
         asn1.der.parse_schema(schema, captures, der_reader) catch |err| switch (err) {
             error.InvalidLength,
             error.InvalidTag,
@@ -244,13 +265,7 @@ pub const TrustedAnchor = struct {
 
     pub fn destroy(self: @This(), alloc: *Allocator) void {
         alloc.free(self.dn);
-        switch (self.public_key) {
-            .rsa => |rsa| {
-                alloc.free(rsa.modulus);
-                alloc.free(rsa.exponent);
-            },
-            .ec => |ec| alloc.free(ec.curve_point),
-        }
+        self.public_key.deinit(alloc);
     }
 
     pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -307,7 +322,6 @@ pub const TrustedAnchorChain = struct {
         var it = pemCertificateIterator(pem_reader);
         while (try it.next()) |cert_reader| {
             var buffered = std.io.bufferedReader(cert_reader);
-            // @TODO Errdefer free this.
             const anchor = try TrustedAnchor.create(allocator, buffered.reader());
             errdefer anchor.destroy(allocator);
 
