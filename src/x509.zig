@@ -9,6 +9,8 @@ comptime {
 }
 
 // zig fmt: off
+// http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
+// @TODO add backing integer, values
 pub const CurveId = enum {
     sect163k1, sect163r1, sect163r2, sect193r1,
     sect193r2, sect233k1, sect233r1, sect239k1,
@@ -24,8 +26,9 @@ pub const CurveId = enum {
 pub const PublicKey = union(enum) {
     /// RSA public key
     rsa: struct {
-        modulus: []const u8,
-        exponent: []const u8,
+        //Positive std.math.big.int.Const numbers.
+        modulus: []const usize,
+        exponent: []const usize,
     },
     /// Elliptic curve public key
     ec: struct {
@@ -95,51 +98,101 @@ pub const TrustedAnchor = struct {
         try asn1.der.parse_schema(schema, captures, reader);
     }
 
-    fn initSignatureAlgorithm(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
-        // Check if RSA or EC, extract EC CurveId if its an EC.
-        const object_id = try asn1.der.parse_value(state.allocator, reader);
-        defer object_id.deinit(state.allocator);
-        if (object_id != .object_identifier) return error.DoesNotMatchSchema;
+    fn initPublicKeyInfo(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
+        const seq = try asn1.der.parse_value(state.allocator, reader);
+        defer seq.deinit(state.allocator);
 
-        if (object_id.object_identifier.len != 6 and object_id.object_identifier.len != 7)
+        if (seq != .sequence or seq.sequence.len != 2 or seq.sequence[0] != .object_identifier)
             return error.DoesNotMatchSchema;
 
-        const data = object_id.object_identifier.data;
-        if (object_id.object_identifier.len == 6 and data[0] == 1 and data[1] == 2 and data[2] == 840 and
-            data[3] == 10045 and data[4] == 2 and data[5] == 1)
-        {
-            // @TODO Get curve id
-            state.self.public_key = .{ .ec = undefined };
-            return;
-        }
-        if (object_id.object_identifier.len == 6)
+        const oid_len = seq.sequence[0].object_identifier.len;
+        if (oid_len != 6 and oid_len != 7)
             return error.DoesNotMatchSchema;
 
-        if (data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 113549 and data[4] == 1 and
-            data[5] == 1 and (data[6] == 5 or data[6] == 11 or data[6] == 12 or data[6] == 13 or data[6] == 14))
+        const data = seq.sequence[0].object_identifier.data;
+        if (oid_len == 7 and data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 113549 and
+            data[4] == 1 and data[5] == 1 and data[6] == 1)
         {
-            // @TODO Ger modulus, exponent
-            state.self.public_key = .{ .rsa = undefined };
+            if (seq.sequence[1] != .@"null")
+                return error.DoesNotMatchSchema;
+
+            // RSA key
+            {
+                // BitString next!
+                if ((try reader.readByte()) != 0x03)
+                    return error.DoesNotMatchSchema;
+                const bit_string_len = try asn1.der.parse_length(reader);
+                const bit_string_unused_bits = try reader.readByte();
+                if (bit_string_unused_bits != 0)
+                    return error.DoesNotMatchSchema;
+
+                if ((try reader.readByte()) != 0x30)
+                    return error.DoesNotMatchSchema;
+                const bs_seq_len = try asn1.der.parse_length(reader);
+
+                // @TODO Parse into []const u8s instead
+                // Modulus
+                const modulus = try asn1.der.parse_value(state.allocator, reader);
+                errdefer modulus.deinit(state.allocator);
+                if (modulus != .int or !modulus.int.positive) return error.DoesNotMatchSchema;
+                // Exponent
+                const exponent = try asn1.der.parse_value(state.allocator, reader);
+                errdefer exponent.deinit(state.allocator);
+                if (exponent != .int or !exponent.int.positive) return error.DoesNotMatchSchema;
+                state.self.public_key = .{
+                    .rsa = .{
+                        .modulus = modulus.int.limbs,
+                        .exponent = exponent.int.limbs,
+                    },
+                };
+            }
             return;
         }
 
-        if (data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 10045 and data[4] == 3 and
-            (data[5] >= 1 and data[5] <= 4))
+        if (oid_len == 6 and data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 10045 and
+            data[4] == 2 and data[5] == 1)
         {
-            // @TODO Get curve id
-            state.self.public_key = .{ .ec = undefined };
+            // We only support named curves, for which the parameter
+            // field is an OID.
+            if (seq.sequence[1] != .object_identifier)
+                return error.DoesNotMatchSchema;
+
+            const curve_oid = seq.sequence[1].object_identifier;
+            const curve_data = curve_oid.data[0..curve_oid.len];
+            // EC key
+            if (curve_data.len != 7 and curve_data.len != 5)
+                return error.DoesNotMatchSchema;
+
+            if (curve_data.len == 5 and curve_data[0] == 1 and curve_data[1] == 3 and curve_data[2] == 132 and
+                curve_data[3] == 0)
+            {
+                if (curve_data[4] == 34)
+                    state.self.public_key = .{ .ec = .{ .id = .secp384r1, .curve_point = undefined } }
+                else if (curve_data[4] == 35)
+                    state.self.public_key = .{ .ec = .{ .id = .secp521r1, .curve_point = undefined } }
+                else
+                    return error.DoesNotMatchSchema;
+            } else if (curve_data.len == 7 and curve_data[0] == 1 and curve_data[1] == 2 and curve_data[2] == 840 and
+                curve_data[3] == 10045 and curve_data[4] == 3 and curve_data[5] == 1 and curve_data[6] == 7)
+            {
+                state.self.public_key = .{ .ec = .{ .id = .secp256r1, .curve_point = undefined } };
+            } else {
+                return error.DoesNotMatchSchema;
+            }
+
+            const ec_bit_string = try asn1.der.parse_value(state.allocator, reader);
+            errdefer ec_bit_string.deinit(state.allocator);
+            if (ec_bit_string != .bit_string or ec_bit_string.bit_string.bit_len % 8 != 0)
+                return error.DoesNotMatchSchema;
+            state.self.public_key.ec.curve_point = ec_bit_string.bit_string.data;
             return;
         }
-
         return error.DoesNotMatchSchema;
-    }
-
-    fn initSignatureValue(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
-        // @TODO
     }
 
     /// Initialize a trusted anchor from distinguished encoding rules (DER) encoded data
     pub fn create(allocator: *Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
+        // @TODO How to gracefully free memory from here? Boolean flags in capture state?
         var self: @This() = undefined;
         self.is_ca = false;
         // https://tools.ietf.org/html/rfc5280#page-117
@@ -155,16 +208,16 @@ pub const TrustedAnchor = struct {
                         .{.sequence}, // issuer
                         .{.sequence}, // validity,
                         .{ .capture, 0, .sequence }, // subject
-                        .{.sequence}, // subjectPublicKeyInfo
+                        .{ .capture, 1, .sequence }, // subjectPublicKeyInfo
                         .{ .optional, .context_specific, 1 }, // issuerUniqueID
                         .{ .optional, .context_specific, 2 }, // subjectUniqueID
-                        .{ .capture, 1, .optional, .context_specific, 3 }, // extensions
+                        .{ .capture, 2, .optional, .context_specific, 3 }, // extensions
                     },
                 },
                 // signatureAlgorithm
-                .{ .capture, 2, .sequence },
+                .{.sequence},
                 // signatureValue
-                .{ .capture, 3, .bit_string },
+                .{.bit_string},
             },
         };
 
@@ -174,9 +227,8 @@ pub const TrustedAnchor = struct {
         };
         const captures = .{
             &capture_state, initSubjectDn,
+            &capture_state, initPublicKeyInfo,
             &capture_state, initExtensions,
-            &capture_state, initSignatureAlgorithm,
-            &capture_state, initSignatureValue,
         };
 
         asn1.der.parse_schema(schema, captures, der_reader) catch |err| switch (err) {
@@ -188,6 +240,60 @@ pub const TrustedAnchor = struct {
             else => |e| return e,
         };
         return self;
+    }
+
+    pub fn destroy(self: @This(), alloc: *Allocator) void {
+        alloc.free(self.dn);
+        switch (self.public_key) {
+            .rsa => |rsa| {
+                alloc.free(rsa.modulus);
+                alloc.free(rsa.exponent);
+            },
+            .ec => |ec| alloc.free(ec.curve_point),
+        }
+    }
+
+    pub fn format(self: @This(), comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print(
+            \\CERTIFICATE
+            \\-----------
+            \\IS CA: {}
+            \\Subject distinguished name (encoded):
+            \\{X}
+            \\Public key:
+            \\
+        , .{ self.is_ca, self.dn });
+
+        switch (self.public_key) {
+            .rsa => |mod_exp| {
+                const modulus = std.math.big.int.Const{ .positive = true, .limbs = mod_exp.modulus };
+                const exponent = std.math.big.int.Const{ .positive = true, .limbs = mod_exp.exponent };
+                try writer.print(
+                    \\RSA
+                    \\modulus: {}
+                    \\exponent: {}
+                    \\
+                , .{
+                    modulus,
+                    exponent,
+                });
+            },
+            .ec => |ec| {
+                try writer.print(
+                    \\EC (Curve: {})
+                    \\point: {}
+                    \\
+                , .{
+                    ec.id,
+                    ec.curve_point,
+                });
+            },
+        }
+
+        try writer.writeAll(
+            \\-----------
+            \\
+        );
     }
 };
 
@@ -203,6 +309,8 @@ pub const TrustedAnchorChain = struct {
             var buffered = std.io.bufferedReader(cert_reader);
             // @TODO Errdefer free this.
             const anchor = try TrustedAnchor.create(allocator, buffered.reader());
+            errdefer anchor.destroy(allocator);
+
             // This read forces the cert reader to find the `-----END`
             _ = cert_reader.readByte() catch |err| switch (err) {
                 error.EndOfStream => {
@@ -218,16 +326,7 @@ pub const TrustedAnchorChain = struct {
 
     pub fn deinit(self: @This()) void {
         const alloc = self.data.allocator;
-        for (self.data.items) |ta| {
-            alloc.free(ta.dn);
-            switch (ta.public_key) {
-                .rsa => |rsa| {
-                    alloc.free(rsa.modulus);
-                    alloc.free(rsa.exponent);
-                },
-                .ec => |ec| alloc.free(ec.curve_point),
-            }
-        }
+        for (self.data.items) |ta| ta.destroy(alloc);
         self.data.deinit();
     }
 };
@@ -581,5 +680,10 @@ test "pemCertificateIterator" {
 test "TrustedAnchorChain" {
     var fbs = std.io.fixedBufferStream(github_pem);
     const chain = try TrustedAnchorChain.from_pem(std.testing.allocator, fbs.reader());
-    // defer chain.deinit();
+    defer chain.deinit();
+
+    std.debug.print("\n", .{});
+    for (chain.data.items) |ta| {
+        std.debug.print("{}\n", .{ta});
+    }
 }
