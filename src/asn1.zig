@@ -25,7 +25,7 @@ pub const Tag = enum(u8) {
 // zig fmt: on
 
 pub const ObjectIdentifier = struct {
-    data: [9]u32,
+    data: [16]u32,
     len: u8,
 };
 
@@ -40,6 +40,7 @@ pub const Value = union(Tag) {
     bit_string: BitString,
     octet_string: []const u8,
     @"null",
+    // @TODO Make this []u32, owned?
     object_identifier: ObjectIdentifier,
     utf8_string: []const u8,
     printable_string: []const u8,
@@ -388,8 +389,7 @@ pub const der = struct {
             @panic("DER length does not fit in usize");
 
         var res_buf = std.mem.zeroes([@sizeOf(usize)]u8);
-        if ((try der_reader.readAll(res_buf[0..length])) != length)
-            return error.EndOfStream;
+        try der_reader.readNoEof(res_buf[0..length]);
         bytes_read.* += length;
 
         if (std.builtin.endian != .Big) {
@@ -439,8 +439,7 @@ pub const der = struct {
                     errdefer alloc.free(limbs);
 
                     var limb_ptr = @ptrCast([*]u8, limbs.ptr);
-                    if ((try der_reader.readAll(limb_ptr[0 .. length - 1])) != length - 1)
-                        return error.EndOfStream;
+                    try der_reader.readNoEof(limb_ptr[0 .. length - 1]);
                     // We always reverse because the standard library big int expects little endian.
                     mem.reverse(u8, limb_ptr[0 .. length - 1]);
 
@@ -457,8 +456,7 @@ pub const der = struct {
 
                 var limb_ptr = @ptrCast([*]u8, limbs.ptr);
                 limb_ptr[0] = first_byte & ~@as(u8, 0x80);
-                if ((try der_reader.readAll(limb_ptr[1..length])) != length - 1)
-                    return error.EndOfStream;
+                try der_reader.readNoEof(limb_ptr[1..length]);
 
                 // We always reverse because the standard library big int expects little endian.
                 mem.reverse(u8, limb_ptr[0..length]);
@@ -472,8 +470,7 @@ pub const der = struct {
                 const bit_count = (length - 1) * 8 - unused_bits;
                 const bit_memory = try alloc.alloc(u8, std.math.divCeil(usize, bit_count, 8) catch unreachable);
                 errdefer alloc.free(bit_memory);
-                if ((try der_reader.readAll(bit_memory[0 .. length - 1])) != length - 1)
-                    return error.EndOfStream;
+                try der_reader.readNoEof(bit_memory[0 .. length - 1]);
 
                 bytes_read.* += length;
                 return Value{ .bit_string = .{ .data = bit_memory, .bit_len = bit_count } };
@@ -481,8 +478,7 @@ pub const der = struct {
             .octet_string, .utf8_string, .printable_string, .utc_time, .ia5_string => {
                 const length = try parse_length_internal(bytes_read, der_reader);
                 const str_mem = try alloc.alloc(u8, length);
-                if ((try der_reader.readAll(str_mem)) != length)
-                    return error.EndOfStream;
+                try der_reader.readNoEof(str_mem);
                 bytes_read.* += length;
                 return @as(Value, switch (tag) {
                     .octet_string => .{ .octet_string = str_mem },
@@ -523,7 +519,7 @@ pub const der = struct {
                     out_idx += 1;
                 }
                 ret.object_identifier.len = out_idx;
-                std.debug.assert(out_idx <= 9);
+                std.debug.assert(out_idx <= 16);
                 bytes_read.* += length;
                 return ret;
             },

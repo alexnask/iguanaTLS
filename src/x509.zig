@@ -4,9 +4,6 @@ const mem = std.mem;
 const trait = std.meta.trait;
 
 const asn1 = @import("asn1.zig");
-comptime {
-    std.testing.refAllDecls(asn1);
-}
 
 // zig fmt: off
 // http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
@@ -57,7 +54,7 @@ pub fn DecodeDERError(comptime Reader: type) type {
     };
 }
 
-pub const TrustedAnchor = struct {
+pub const TrustAnchor = struct {
     /// Subject distinguished name
     dn: []const u8,
     /// A "CA" anchor is deemed fit to verify signatures on certificates.
@@ -67,7 +64,7 @@ pub const TrustedAnchor = struct {
     public_key: PublicKey,
 
     const CaptureState = struct {
-        self: *TrustedAnchor,
+        self: *TrustAnchor,
         allocator: *Allocator,
         dn_allocated: bool = false,
         pk_allocated: bool = false,
@@ -75,8 +72,7 @@ pub const TrustedAnchor = struct {
     fn initSubjectDn(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
         const dn_mem = try state.allocator.alloc(u8, length);
         errdefer state.allocator.free(dn_mem);
-        if ((try reader.readAll(dn_mem)) != length)
-            return error.EndOfStream;
+        try reader.readNoEof(dn_mem);
         state.self.dn = dn_mem;
         state.dn_allocated = true;
     }
@@ -112,6 +108,8 @@ pub const TrustedAnchor = struct {
     }
 
     fn initPublicKeyInfo(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
+        // @TODO Use reader.isBytes instead of parsing and a bunch of checks here.
+        // Or read and a couple of mem.eqls (read tag, check its seq, read min amnt of bytes, check, read rest, check else error)
         const seq = try asn1.der.parse_value(state.allocator, reader);
         defer seq.deinit(state.allocator);
 
@@ -134,14 +132,14 @@ pub const TrustedAnchor = struct {
                 // BitString next!
                 if ((try reader.readByte()) != 0x03)
                     return error.DoesNotMatchSchema;
-                const bit_string_len = try asn1.der.parse_length(reader);
+                _ = try asn1.der.parse_length(reader);
                 const bit_string_unused_bits = try reader.readByte();
                 if (bit_string_unused_bits != 0)
                     return error.DoesNotMatchSchema;
 
                 if ((try reader.readByte()) != 0x30)
                     return error.DoesNotMatchSchema;
-                const bs_seq_len = try asn1.der.parse_length(reader);
+                _ = try asn1.der.parse_length(reader);
 
                 // @TODO Parse into []const u8s instead
                 // Modulus
@@ -263,7 +261,7 @@ pub const TrustedAnchor = struct {
         return self;
     }
 
-    pub fn destroy(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: *Allocator) void {
         alloc.free(self.dn);
         self.public_key.deinit(alloc);
     }
@@ -312,20 +310,21 @@ pub const TrustedAnchor = struct {
     }
 };
 
-pub const TrustedAnchorChain = struct {
-    data: std.ArrayList(TrustedAnchor),
+pub const TrustAnchorChain = struct {
+    data: std.ArrayList(TrustAnchor),
 
     pub fn from_pem(allocator: *Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
-        var self = @This(){ .data = std.ArrayList(TrustedAnchor).init(allocator) };
+        var self = @This(){ .data = std.ArrayList(TrustAnchor).init(allocator) };
         errdefer self.deinit();
 
         var it = pemCertificateIterator(pem_reader);
         while (try it.next()) |cert_reader| {
             var buffered = std.io.bufferedReader(cert_reader);
-            const anchor = try TrustedAnchor.create(allocator, buffered.reader());
-            errdefer anchor.destroy(allocator);
+            const anchor = try TrustAnchor.create(allocator, buffered.reader());
+            errdefer anchor.deinit(allocator);
 
             // This read forces the cert reader to find the `-----END`
+            // @TODO Should work without this read, investigate
             _ = cert_reader.readByte() catch |err| switch (err) {
                 error.EndOfStream => {
                     try self.data.append(anchor);
@@ -340,7 +339,7 @@ pub const TrustedAnchorChain = struct {
 
     pub fn deinit(self: @This()) void {
         const alloc = self.data.allocator;
-        for (self.data.items) |ta| ta.destroy(alloc);
+        for (self.data.items) |ta| ta.deinit(alloc);
         self.data.deinit();
     }
 };
@@ -609,6 +608,18 @@ pub fn pemCertificateIterator(reader: anytype) PEMCertificateIterator(@TypeOf(re
     return .{ .reader = reader };
 }
 
+pub const NameElement = struct {
+    // Encoded OID without tag
+    oid: asn1.ObjectIdentifier,
+    // Destination buffer
+    buf: []u8,
+    status: enum {
+        not_found,
+        found,
+        errored,
+    },
+};
+
 const github_pem = @embedFile("../test/github.pem");
 const github_der = @embedFile("../test/github.der");
 
@@ -691,13 +702,8 @@ test "pemCertificateIterator" {
     }
 }
 
-test "TrustedAnchorChain" {
+test "TrustAnchorChain" {
     var fbs = std.io.fixedBufferStream(github_pem);
-    const chain = try TrustedAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    const chain = try TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
     defer chain.deinit();
-
-    std.debug.print("\n", .{});
-    for (chain.data.items) |ta| {
-        std.debug.print("{}\n", .{ta});
-    }
 }
