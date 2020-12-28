@@ -224,7 +224,6 @@ pub const HandshakeOptions = mixtime(.{
 
 pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reader: type, comptime Writer: type) type {
     const Additional = error{
-        RandomBytesFailed,
         ServerInvalidVersion,
         ServerMalformedResponse,
         EndOfStream,
@@ -265,11 +264,7 @@ pub fn client_connect(
     const hashing_writer = sha256_writer(&handshake_record_hash, writer);
 
     var client_random: [32]u8 = undefined;
-    const rand = options.rand orelse blk: {
-        var secret_seed: [std.rand.Gimli.secret_seed_length]u8 = undefined;
-        std.crypto.random.bytes(&secret_seed);
-        break :blk &std.rand.Gimli.init(secret_seed).random;
-    };
+    const rand = options.rand orelse std.crypto.random;
     rand.bytes(&client_random);
 
     var server_random: [32]u8 = undefined;
@@ -935,12 +930,12 @@ test "Dummy" {
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
 
-    try client.writer().writeAll("GET / HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
+    try client.writer().writeAll("GET /wiki/Main_Page HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 
     // Check some headers are read correctly.
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-        std.testing.expectEqualStrings("HTTP/1.1 301 Moved Permanently", mem.trim(u8, header, &std.ascii.spaces));
+        std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.spaces));
         std.testing.allocator.free(header);
     }
 
@@ -951,7 +946,7 @@ test "Dummy" {
 
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-        std.testing.expectEqualStrings("Server: mw1264.eqiad.wmnet", mem.trim(u8, header, &std.ascii.spaces));
+        std.testing.expect(mem.endsWith(u8, mem.trim(u8, header, &std.ascii.spaces), ".eqiad.wmnet"));
         std.testing.allocator.free(header);
     }
 
@@ -971,17 +966,20 @@ test "Dummy" {
     var content_length: ?usize = null;
     hdr_loop: while (true) {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
+        defer std.testing.allocator.free(header);
+
         const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
         if (hdr_contents.len == 0) {
-            try client.reader().skipUntilDelimiterOrEof('\n');
             break :hdr_loop;
         }
 
         if (mem.startsWith(u8, hdr_contents, "Content-Length: ")) {
             content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
         }
-        std.testing.allocator.free(header);
     }
     std.testing.expect(content_length != null);
-    std.debug.print("CONTENT LENGTH: {}\n", .{content_length});
+    const html_contents = try std.testing.allocator.alloc(u8, content_length.?);
+    defer std.testing.allocator.free(html_contents);
+
+    try client.reader().readNoEof(html_contents);
 }
