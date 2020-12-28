@@ -734,6 +734,7 @@ fn keyToWords(key: [32]u8) [8]u32 {
 
 pub fn Client(comptime _Reader: type, comptime _Writer: type) type {
     return struct {
+        // @TODO Pass this in HandshakeOptions with this as a default.
         const internal_buffer_size = 4 * 1024;
         const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion };
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
@@ -936,6 +937,7 @@ test "Dummy" {
 
     try client.writer().writeAll("GET / HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 
+    // Check some headers are read correctly.
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
         std.testing.expectEqualStrings("HTTP/1.1 301 Moved Permanently", mem.trim(u8, header, &std.ascii.spaces));
@@ -964,4 +966,22 @@ test "Dummy" {
         std.testing.expectEqualStrings("P3p: CP=\"See https://en.wikipedia.org/wiki/Special:CentralAutoLogin/P3P for more info.\"", mem.trim(u8, header, &std.ascii.spaces));
         std.testing.allocator.free(header);
     }
+
+    // Skip the tesdt of the headers expect for Content-Length
+    var content_length: ?usize = null;
+    hdr_loop: while (true) {
+        const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
+        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        if (hdr_contents.len == 0) {
+            try client.reader().skipUntilDelimiterOrEof('\n');
+            break :hdr_loop;
+        }
+
+        if (mem.startsWith(u8, hdr_contents, "Content-Length: ")) {
+            content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
+        }
+        std.testing.allocator.free(header);
+    }
+    std.testing.expect(content_length != null);
+    std.debug.print("CONTENT LENGTH: {}\n", .{content_length});
 }
