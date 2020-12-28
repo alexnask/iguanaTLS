@@ -267,7 +267,7 @@ pub fn client_connect(
     var client_random: [32]u8 = undefined;
     const rand = options.rand orelse blk: {
         var secret_seed: [std.rand.Gimli.secret_seed_length]u8 = undefined;
-        std.crypto.randomBytes(&secret_seed) catch return error.RandomBytesFailed;
+        std.crypto.random.bytes(&secret_seed);
         break :blk &std.rand.Gimli.init(secret_seed).random;
     };
     rand.bytes(&client_random);
