@@ -322,7 +322,8 @@ pub fn client_connect(
             ext_byte_idx += 4 + ext_len;
             if (ext_tag[0] == 0xFF and ext_tag[1] == 0x01) {
                 // Renegotiation info
-                if (ext_len != 0x01 or (try hashing_reader.readByte()) != 0x00)
+                const renegotiation_info = try hashing_reader.readByte();
+                if (ext_len != 0x01 or renegotiation_info != 0x00)
                     return error.ServerInvalidRenegotiationData;
             } else if (ext_tag[0] == 0x00 and ext_tag[1] == 0x00) {
                 // Server name
@@ -421,7 +422,8 @@ pub fn client_connect(
     // Read server hello done
     {
         const length = try handshake_record_length(reader);
-        if (length != 4 or !try hashing_reader.isBytes("\x0e\x00\x00\x00"))
+        const is_bytes = try hashing_reader.isBytes("\x0e\x00\x00\x00");
+        if (length != 4 or !is_bytes)
             return error.ServerMalformedResponse;
     }
 
@@ -554,7 +556,8 @@ pub fn client_connect(
     // Server change cipher spec
     {
         const length = try record_length(0x14, reader);
-        if (length != 1 or (try reader.readByte()) != 0x01)
+        const next_byte = try reader.readByte();
+        if (length != 1 or next_byte != 0x01)
             return error.ServerMalformedResponse;
     }
     // Server handshake finished
@@ -962,7 +965,7 @@ test "Dummy" {
         std.testing.allocator.free(header);
     }
 
-    // Skip the tesdt of the headers expect for Content-Length
+    // Skip the rest of the headers expect for Content-Length
     var content_length: ?usize = null;
     hdr_loop: while (true) {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
