@@ -194,7 +194,7 @@ pub const der = struct {
         schema: anytype,
         captures: anytype,
         der_reader: anytype,
-    ) DecodeError(@TypeOf(der_reader))!void {
+    ) !void {
         const res = try parse_schema_tag_len_internal(null, null, schema, captures, der_reader);
         if (res != null) return error.DoesNotMatchSchema;
     }
@@ -205,7 +205,7 @@ pub const der = struct {
         schema: anytype,
         captures: anytype,
         der_reader: anytype,
-    ) DecodeError(@TypeOf(der_reader))!void {
+    ) !void {
         const res = try parse_schema_tag_len_internal(
             existing_tag_byte,
             existing_length,
@@ -227,7 +227,7 @@ pub const der = struct {
         schema: anytype,
         captures: anytype,
         der_reader: anytype,
-    ) DecodeError(@TypeOf(der_reader))!?TagLength {
+    ) !?TagLength {
         const Reader = @TypeOf(der_reader);
 
         const isEnumLit = comptime std.meta.trait.is(.EnumLiteral);
@@ -370,6 +370,42 @@ pub const der = struct {
             cur_tag_length = try parse_schema_tag_len_internal(curr_tag, curr_length, sub_schemas[i], captures, der_reader);
         }
         return cur_tag_length;
+    }
+
+    // @TODO add a test for this
+    pub const EncodedLength = struct {
+        data: [@sizeOf(usize) + 1]u8,
+        len: usize,
+
+        pub fn slice(self: @This()) []const u8 {
+            if (self.len == 1) return self.data[0..1];
+            return self.data[0 .. 1 + self.len];
+        }
+    };
+
+    pub fn encode_length(length: usize) EncodedLength {
+        var enc = EncodedLength{ .data = undefined, .len = 0 };
+        if (length < 128) {
+            enc.data[0] = @truncate(u8, length);
+            enc.len = 1;
+        } else {
+            const bytes_needed = @intCast(u8, std.math.divCeil(
+                usize,
+                std.math.log2_int_ceil(usize, length),
+                8,
+            ) catch unreachable);
+            enc.data[0] = bytes_needed | 0x80;
+            mem.copy(
+                u8,
+                enc.data[1 .. bytes_needed + 1],
+                mem.asBytes(&length)[0..bytes_needed],
+            );
+            if (std.builtin.endian != .Big) {
+                mem.reverse(u8, enc.data[1 .. bytes_needed + 1]);
+            }
+            enc.len = bytes_needed;
+        }
+        return enc;
     }
 
     pub fn parse_length(der_reader: anytype) !usize {
