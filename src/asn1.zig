@@ -372,7 +372,6 @@ pub const der = struct {
         return cur_tag_length;
     }
 
-    // @TODO add a test for this
     pub const EncodedLength = struct {
         data: [@sizeOf(usize) + 1]u8,
         len: usize,
@@ -612,6 +611,5 @@ test "der.parse_value" {
     var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const value = try der.parse_value(&arena.allocator, fbs.reader());
-    // @TODO Check stuff here.
+    _ = try der.parse_value(&arena.allocator, fbs.reader());
 }

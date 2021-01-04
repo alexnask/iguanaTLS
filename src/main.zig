@@ -1,6 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const Sha384 = std.crypto.hash.sha2.Sha384;
+const Sha512 = std.crypto.hash.sha2.Sha512;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Hmac256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
@@ -32,21 +34,21 @@ const client_hello_start: [61]u8 = [_]u8{
     0x01, 0x00,
     // Extensions length
     undefined, undefined,
-    // Extension: server
+    // Extension: server name
     // id, length, length of entry
     0x00, 0x00, undefined, undefined, undefined, undefined,
     // entry type, length of bytes
     0x00, undefined, undefined,
 };
 
-const client_hello_end = [37]u8 {
+const client_hello_end = [33]u8 {
     // Extension: supported groups, for now just x25519 (00 1D)
     0x00, 0x0A, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1D,
     // Extension: EC point formats => uncompressed point format
     0x00, 0x0B, 0x00, 0x02, 0x01, 0x00,
     // Extension: Signature algorithms
-    // RSA/PKCS1/SHA256, ECDSA/SECP256r1/SHA256, RSA/PKCS1/SHA512, ECDSA/SECP521r1/SHA512
-    0x00, 0x0D, 0x00, 0x0A, 0x00, 0x08, 0x04, 0x01, 0x04, 0x03, 0x06, 0x01, 0x06, 0x02,
+    // RSA/PKCS1/SHA256, RSA/PKCS1/SHA512
+    0x00, 0x0D, 0x00, 0x06, 0x00, 0x04, 0x04, 0x01, 0x06, 0x01,
     // Extension: Renegotiation Info => new connection
     0xFF, 0x01, 0x00, 0x01, 0x00,
     // Extension: SCT (signed certificate timestamp)
@@ -226,17 +228,19 @@ pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reade
         ServerInvalidExtension,
         ServerInvalidCurve,
         ServerInvalidSignature,
+        ServerInvalidSignatureAlgorithm,
         X25519KeyPairCreateFailed,
         X25519MultFailed,
         ServerAuthenticationFailed,
         ServerInvalidVerifyData,
+        OutOfMemory,
     };
     const err_msg = "Certificate verifier function cannot be generic, use CertificateVerifierReader to get the reader argument type";
     return Reader.Error || Writer.Error || ServerAlert || Additional || switch (verifier) {
         .none => error{},
         .function => |f| @typeInfo(@typeInfo(@TypeOf(f)).Fn.return_type orelse
             @compileError(err_msg)).ErrorUnion.error_set || error{CertificateVerificationFailed},
-        .default => error{ CertificateVerificationFailed, OutOfMemory },
+        .default => error{CertificateVerificationFailed},
     };
 }
 
@@ -318,11 +322,11 @@ fn check_cert_timestamp(time: i64, tag_byte: u8, length: usize, reader: anytype)
         return error.CertificateVerificationFailed;
 }
 
-fn add_cert_subject_dn(state: *CaptureState, _: u8, length: usize, reader: anytype) !void {
+fn add_cert_subject_dn(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
     state.list.items[state.list.items.len - 1].dn = state.fbs.buffer[state.fbs.pos .. state.fbs.pos + length];
 }
 
-fn add_cert_public_key(state: *CaptureState, _: u8, length: usize, reader: anytype) !void {
+fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
     state.list.items[state.list.items.len - 1].public_key = x509.parse_public_key(
         state.allocator,
         reader,
@@ -332,11 +336,12 @@ fn add_cert_public_key(state: *CaptureState, _: u8, length: usize, reader: anyty
     };
 }
 
-fn add_server_cert(state: *CaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
+fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
     const is_ca = state.list.items.len != 0;
 
     const encoded_length = asn1.der.encode_length(length).slice();
     const cert_bytes = try state.allocator.alloc(u8, length + 1 + encoded_length.len);
+    errdefer state.allocator.free(cert_bytes);
     cert_bytes[0] = tag_byte;
     mem.copy(u8, cert_bytes[1 .. 1 + encoded_length.len], encoded_length);
 
@@ -346,9 +351,10 @@ fn add_server_cert(state: *CaptureState, tag_byte: u8, length: usize, reader: an
         .bytes = cert_bytes,
         .dn = undefined,
         .public_key = undefined,
-        .signature = undefined,
+        .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
     };
+    errdefer state.allocator.free(state.list.items[state.list.items.len - 1].signature.data);
 
     const schema = .{
         .sequence,
@@ -385,7 +391,7 @@ fn add_server_cert(state: *CaptureState, tag_byte: u8, length: usize, reader: an
     };
 }
 
-fn set_signature_algorithm(state: *CaptureState, _: u8, length: usize, reader: anytype) !void {
+fn set_signature_algorithm(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
     const oid_tag = try reader.readByte();
     if (oid_tag != 0x06)
         return error.CertificateVerificationFailed;
@@ -420,10 +426,11 @@ fn set_signature_algorithm(state: *CaptureState, _: u8, length: usize, reader: a
     return error.CertificateVerificationFailed;
 }
 
-fn set_signature_value(state: *CaptureState, tag: u8, length: usize, reader: anytype) !void {
+fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     const unused_bits = try reader.readByte();
     const bit_count = (length - 1) * 8 - unused_bits;
     const signature_bytes = try state.allocator.alloc(u8, length - 1);
+    errdefer state.allocator.free(signature_bytes);
     try reader.readNoEof(signature_bytes);
     state.list.items[state.list.items.len - 1].signature = .{
         .data = signature_bytes,
@@ -431,83 +438,43 @@ fn set_signature_value(state: *CaptureState, tag: u8, length: usize, reader: any
     };
 }
 
-const SignatureAlgorithm = enum {
-    rsa,
-    rsa_md5,
-    rsa_sha1,
-    rsa_sha256,
-    rsa_sha384,
-    rsa_sha512,
-    // @TODO ECDSA versions
-};
-
-const ServerCertificate = struct {
-    is_ca: bool,
-    bytes: []const u8,
-    dn: []const u8,
-    public_key: x509.PublicKey,
-    signature: asn1.BitString,
-    signature_algorithm: SignatureAlgorithm,
-};
-
-fn certificate_verify_signature(
+fn verify_signature(
     allocator: *Allocator,
     signature_algorithm: SignatureAlgorithm,
     signature: asn1.BitString,
-    bytes: []const u8,
+    hash: []const u8,
     public_key: x509.PublicKey,
 ) !bool {
     // @TODO ECDSA algorithms
     if (public_key != .rsa) return false;
-
-    var hash_buf: [64]u8 = undefined;
-    var hash: []u8 = undefined;
-    var prefix: []const u8 = undefined;
-
-    // _private_tls_compute_hash
-    // LTC_PKCS_1_V1_5
-    switch (signature_algorithm) {
+    const prefix: []const u8 = switch (signature_algorithm) {
         // Deprecated hash algos
         .rsa_md5, .rsa_sha1 => return false,
         // @TODO How does this one work?
         .rsa => return false,
-
-        .rsa_sha256 => {
-            std.crypto.hash.sha2.Sha256.hash(bytes, hash_buf[0..32], .{});
-            hash = hash_buf[0..32];
-            prefix = &[_]u8{
-                0x30, 0x31, 0x30, 0x0d, 0x06,
-                0x09, 0x60, 0x86, 0x48, 0x01,
-                0x65, 0x03, 0x04, 0x02, 0x01,
-                0x05, 0x00, 0x04, 0x20,
-            };
+        .rsa_sha256 => &[_]u8{
+            0x30, 0x31, 0x30, 0x0d, 0x06,
+            0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x01,
+            0x05, 0x00, 0x04, 0x20,
         },
-        .rsa_sha384 => {
-            std.crypto.hash.sha2.Sha384.hash(bytes, hash_buf[0..48], .{});
-            hash = hash_buf[0..48];
-            prefix = &[_]u8{
-                0x30, 0x41, 0x30, 0x0d, 0x06,
-                0x09, 0x60, 0x86, 0x48, 0x01,
-                0x65, 0x03, 0x04, 0x02, 0x02,
-                0x05, 0x00, 0x04, 0x30,
-            };
+        .rsa_sha384 => &[_]u8{
+            0x30, 0x41, 0x30, 0x0d, 0x06,
+            0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x02,
+            0x05, 0x00, 0x04, 0x30,
         },
-        .rsa_sha512 => {
-            std.crypto.hash.sha2.Sha512.hash(bytes, hash_buf[0..64], .{});
-            hash = &hash_buf;
-            prefix = &[_]u8{
-                0x30, 0x51, 0x30, 0x0d, 0x06,
-                0x09, 0x60, 0x86, 0x48, 0x01,
-                0x65, 0x03, 0x04, 0x02, 0x03,
-                0x05, 0x00, 0x04, 0x40,
-            };
+        .rsa_sha512 => &[_]u8{
+            0x30, 0x51, 0x30, 0x0d, 0x06,
+            0x09, 0x60, 0x86, 0x48, 0x01,
+            0x65, 0x03, 0x04, 0x02, 0x03,
+            0x05, 0x00, 0x04, 0x40,
         },
-    }
+    };
 
     // RSA hash verification with PKCS 1 V1_5 padding
     const modulus = std.math.big.int.Const{ .limbs = public_key.rsa.modulus, .positive = true };
     const exponent = std.math.big.int.Const{ .limbs = public_key.rsa.exponent, .positive = true };
-
     if (modulus.bitCountAbs() != signature.bit_len)
         return false;
 
@@ -562,11 +529,46 @@ fn certificate_verify_signature(
         return false;
     if (enc_buf[enc_buf.len - hash.len - prefix.len - 1] != 0x00)
         return false;
-    for (enc_buf[2..enc_buf.len - hash.len - prefix.len - 1]) |c| {
+    for (enc_buf[2 .. enc_buf.len - hash.len - prefix.len - 1]) |c| {
         if (c != 0xff) return false;
     }
 
     return true;
+}
+
+fn certificate_verify_signature(
+    allocator: *Allocator,
+    signature_algorithm: SignatureAlgorithm,
+    signature: asn1.BitString,
+    bytes: []const u8,
+    public_key: x509.PublicKey,
+) !bool {
+    // @TODO ECDSA algorithms
+    if (public_key != .rsa) return false;
+
+    var hash_buf: [64]u8 = undefined;
+    var hash: []u8 = undefined;
+
+    switch (signature_algorithm) {
+        // Deprecated hash algos
+        .rsa_md5, .rsa_sha1 => return false,
+        // @TODO How does this one work?
+        .rsa => return false,
+
+        .rsa_sha256 => {
+            Sha256.hash(bytes, hash_buf[0..32], .{});
+            hash = hash_buf[0..32];
+        },
+        .rsa_sha384 => {
+            Sha384.hash(bytes, hash_buf[0..48], .{});
+            hash = hash_buf[0..48];
+        },
+        .rsa_sha512 => {
+            Sha512.hash(bytes, hash_buf[0..64], .{});
+            hash = &hash_buf;
+        },
+    }
+    return try verify_signature(allocator, signature_algorithm, signature, hash, public_key);
 }
 
 // res = res mod N
@@ -576,7 +578,26 @@ fn llmod(res: *std.math.big.int.Managed, n: std.math.big.int.Const) !void {
     try temp.divTrunc(res, res.toConst(), n);
 }
 
-const CaptureState = struct {
+const SignatureAlgorithm = enum {
+    rsa,
+    rsa_md5,
+    rsa_sha1,
+    rsa_sha256,
+    rsa_sha384,
+    rsa_sha512,
+    // @TODO ECDSA versions
+};
+
+const ServerCertificate = struct {
+    is_ca: bool,
+    bytes: []const u8,
+    dn: []const u8,
+    public_key: x509.PublicKey,
+    signature: asn1.BitString,
+    signature_algorithm: SignatureAlgorithm,
+};
+
+const VerifierCaptureState = struct {
     list: std.ArrayListUnmanaged(ServerCertificate),
     allocator: *Allocator,
     // Used in `add_server_cert` to avoid an extra allocation
@@ -589,15 +610,20 @@ pub fn default_cert_verifier(
     certs_bytes: usize,
     trusted_certificates: []const x509.TrustAnchor,
     hostname: []const u8,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var capture_state = CaptureState{
-        .list = try std.ArrayListUnmanaged(ServerCertificate).initCapacity(&arena.allocator, 3),
-        .allocator = &arena.allocator,
+) !x509.PublicKey {
+    var capture_state = VerifierCaptureState{
+        .list = try std.ArrayListUnmanaged(ServerCertificate).initCapacity(allocator, 3),
+        .allocator = allocator,
         .fbs = undefined,
     };
+    defer {
+        for (capture_state.list.items) |cert| {
+            cert.public_key.deinit(allocator);
+            allocator.free(cert.bytes);
+            allocator.free(cert.signature.data);
+        }
+        capture_state.list.deinit(allocator);
+    }
 
     const schema = .{
         .sequence, .{
@@ -652,7 +678,16 @@ pub fn default_cert_verifier(
             // Try to find an exact match to a trusted certificate
             if (cert.is_ca == trusted.is_ca and mem.eql(u8, cert.dn, trusted.dn) and
                 cert.public_key.eql(trusted.public_key))
-                return;
+            {
+                const key = chain[0].public_key;
+                chain[0].public_key = x509.PublicKey{
+                    .ec = .{
+                        .id = undefined,
+                        .curve_point = &[0]u8{},
+                    },
+                };
+                return key;
+            }
 
             if (!trusted.is_ca)
                 continue;
@@ -664,11 +699,79 @@ pub fn default_cert_verifier(
                 cert.bytes,
                 trusted.public_key,
             )) {
-                return;
+                const key = chain[0].public_key;
+                chain[0].public_key = x509.PublicKey{
+                    .ec = .{
+                        .id = undefined,
+                        .curve_point = &[0]u8{},
+                    },
+                };
+                return key;
             }
         }
     }
     return error.CertificateVerificationFailed;
+}
+
+pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: usize) !x509.PublicKey {
+    const CaptureState = struct {
+        pub_key: x509.PublicKey,
+        allocator: *Allocator,
+    };
+    var capture_state = CaptureState{
+        .pub_key = undefined,
+        .allocator = allocator,
+    };
+
+    var pub_key: x509.PublicKey = undefined;
+    const schema = .{
+        .sequence, .{
+            // tbsCertificate
+            .{
+                .sequence,
+                .{
+                    .{ .context_specific, 0 }, // version
+                    .{.int}, // serialNumber
+                    .{.sequence}, // signature
+                    .{.sequence}, // issuer
+                    .{.sequence}, // validity
+                    .{.sequence}, // subject
+                    .{ .capture, 0, .sequence }, // subjectPublicKeyInfo
+                    .{ .optional, .context_specific, 1 }, // issuerUniqueID
+                    .{ .optional, .context_specific, 2 }, // subjectUniqueID
+                    .{ .optional, .context_specific, 3 }, // extensions
+                },
+            },
+            // signatureAlgorithm
+            .{.sequence},
+            // signatureValue
+            .{.bit_string},
+        },
+    };
+    const captures = .{
+        &capture_state, struct {
+            fn f(state: *CaptureState, tag: u8, _: usize, subreader: anytype) !void {
+                state.pub_key = x509.parse_public_key(state.allocator, subreader) catch |err| switch (err) {
+                    error.MalformedDER => return error.ServerMalformedResponse,
+                    else => |e| return e,
+                };
+            }
+        }.f,
+    };
+
+    const cert_length = try reader.readIntBig(u24);
+    asn1.der.parse_schema(schema, captures, reader) catch |err| switch (err) {
+        error.InvalidLength,
+        error.InvalidTag,
+        error.InvalidContainerLength,
+        error.DoesNotMatchSchema,
+        => return error.ServerMalformedResponse,
+        else => |e| return e,
+    };
+    errdefer capture_state.pub_key.deinit(allocator);
+
+    try reader.skipBytes(length - cert_length - 3, .{});
+    return capture_state.pub_key;
 }
 
 pub fn client_connect(
@@ -684,11 +787,11 @@ pub fn client_connect(
         @TypeOf(options.cert_verifier) != @Type(.EnumLiteral))
         @compileError("cert_verifier should be of type CertificateVerifier");
 
+    if (!@hasField(Options, "temp_allocator"))
+        @compileError("Option tuple is missing field 'temp_allocator'");
     if (options.cert_verifier == .default) {
         if (!@hasField(Options, "trusted_certificates"))
             @compileError("Option tuple is missing field 'trusted_certificates' for .default cert_verifier");
-        if (!@hasField(Options, "temp_allocator"))
-            @compileError("Option tuple is missing field 'temp_allocator' for .default cert_verifier");
     }
 
     // @TODO Things like supported cipher suites, compression methods, extensions as comptime here?
@@ -712,10 +815,10 @@ pub fn client_connect(
 
     {
         var msg_buf = client_hello_start;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, hostname.len + 0x5D));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, hostname.len + 0x59));
+        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, hostname.len + 0x59));
+        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, hostname.len + 0x55));
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[50..52], @intCast(u16, hostname.len + 0x2E));
+        mem.writeIntBig(u16, msg_buf[50..52], @intCast(u16, hostname.len + 0x2A));
         mem.writeIntBig(u16, msg_buf[54..56], @intCast(u16, hostname.len + 5));
         mem.writeIntBig(u16, msg_buf[56..58], @intCast(u16, hostname.len + 3));
         mem.writeIntBig(u16, msg_buf[59..61], @intCast(u16, hostname.len));
@@ -787,6 +890,8 @@ pub fn client_connect(
             return error.ServerMalformedResponse;
     }
     // Read server certificates
+    var certificate_public_key: x509.PublicKey = undefined;
+    errdefer certificate_public_key.deinit(options.temp_allocator);
     {
         const length = try handshake_record_length(reader);
         {
@@ -798,18 +903,21 @@ pub fn client_connect(
         const certs_length = try hashing_reader.readIntBig(u24);
         const cert_verifier: CertificateVerifier = options.cert_verifier;
         switch (cert_verifier) {
-            .none => try hashing_reader.skipBytes(certs_length, .{}),
+            .none => certificate_public_key = try extract_cert_public_key(
+                options.temp_allocator,
+                hashing_reader,
+                certs_length,
+            ),
             .function => |f| {
                 var reader_state = CertificateReaderState(@TypeOf(hashing_reader)){
                     .reader = hashing_reader,
                     .length = certs_length,
                 };
                 var cert_reader = CertificateReader(@TypeOf(hashing_reader)){ .context = &reader_state };
-                if (!try f(cert_reader))
-                    return error.CertificateVerificationFailed;
+                certificate_public_key = try f(cert_reader);
                 try hashing_reader.skipBytes(reader_state.length - reader_state.idx, .{});
             },
-            .default => try default_cert_verifier(
+            .default => certificate_public_key = try default_cert_verifier(
                 options.temp_allocator,
                 hashing_reader,
                 certs_length,
@@ -836,37 +944,59 @@ pub fn client_connect(
         const pub_key_len = try hashing_reader.readByte();
         if (pub_key_len != 32)
             return error.ServerMalformedResponse;
-
         try hashing_reader.readNoEof(&server_public_key);
 
         // Signed public key
         const signature_id = try hashing_reader.readIntBig(u16);
         const signature_len = try hashing_reader.readIntBig(u16);
-        switch (signature_id) {
+
+        var hash_buf: [64]u8 = undefined;
+        var hash: []const u8 = undefined;
+        const signature_algoritm: SignatureAlgorithm = switch (signature_id) {
             // RSA/PKCS1/SHA256
-            0x0401 => {
+            0x0401 => block: {
                 if (signature_len != 256)
                     return error.ServerMalformedResponse;
-            },
-            // ECDSA/SECP256r1/SHA256
-            0x0403 => {
-                if (signature_len != 256)
-                    return error.ServerMalformedResponse;
+
+                var sha256 = Sha256.init(.{});
+                sha256.update(&client_random);
+                sha256.update(&server_random);
+                sha256.update("\x03\x00\x1D\x20");
+                sha256.update(&server_public_key);
+                sha256.final(hash_buf[0..32]);
+                hash = hash_buf[0..32];
+                break :block .rsa_sha256;
             },
             // RSA/PKCS1/SHA512
-            0x0601 => {
+            0x0601 => block: {
                 if (signature_len != 512)
                     return error.ServerMalformedResponse;
+                var sha512 = Sha512.init(.{});
+                sha512.update(&client_random);
+                sha512.update(&server_random);
+                sha512.update("\x03\x00\x1D\x20");
+                sha512.update(&server_public_key);
+                sha512.final(hash_buf[0..64]);
+                hash = hash_buf[0..64];
+                break :block .rsa_sha512;
             },
-            // ECDSA/SECP521r1/SHA512
-            0x0602 => {
-                if (signature_len != 512)
-                    return error.ServerMalformedResponse;
-            },
-            else => return error.ServerInvalidSignature,
-        }
-        // TODO Verify the signature
-        try hashing_reader.skipBytes(signature_len, .{});
+            else => return error.ServerInvalidSignatureAlgorithm,
+        };
+        const signature_bytes = try options.temp_allocator.alloc(u8, signature_len);
+        defer options.temp_allocator.free(signature_bytes);
+        try hashing_reader.readNoEof(signature_bytes);
+
+        if (!try verify_signature(
+            options.temp_allocator,
+            signature_algoritm,
+            .{ .data = signature_bytes, .bit_len = signature_len * 8 },
+            hash,
+            certificate_public_key,
+        ))
+            return error.ServerInvalidSignature;
+
+        certificate_public_key.deinit(options.temp_allocator);
+        certificate_public_key = x509.PublicKey{ .ec = .{ .id = undefined, .curve_point = &[0]u8{} } };
     }
     // Read server hello done
     {
@@ -1181,7 +1311,6 @@ fn keyToWords(key: [32]u8) [8]u32 {
 
 pub fn Client(comptime _Reader: type, comptime _Writer: type) type {
     return struct {
-        // @TODO Pass this in HandshakeOptions with this as a default.
         const internal_buffer_size = 4 * 1024;
         const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion };
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
