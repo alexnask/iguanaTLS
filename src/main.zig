@@ -5,63 +5,23 @@ const Sha384 = std.crypto.hash.sha2.Sha384;
 const Sha512 = std.crypto.hash.sha2.Sha512;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Hmac256 = std.crypto.auth.hmac.sha2.HmacSha256;
-const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 
 pub const asn1 = @import("asn1.zig");
 pub const x509 = @import("x509.zig");
 
-const mixtime = @import("mixtime.zig").mixtime;
+const ciphers = @import("ciphersuites.zig");
+pub usingnamespace ciphers.suites;
 
 comptime {
     std.testing.refAllDecls(x509);
     std.testing.refAllDecls(asn1);
 }
 
-// zig fmt: off
-const client_hello_start: [61]u8 = [_]u8{
-    // Record header: Handshake record type, protocol version, handshake size
-    0x16, 0x03, 0x01, undefined, undefined,
-    // Handshake message type, bytes of client hello
-    0x01, undefined, undefined, undefined,
-    // Client version (hardcoded to TLS 1.2 even for TLS 1.3)
-    0x03, 0x03,
-} ++ ([1]u8{undefined} ** 32) ++ [_]u8{
-    // Session ID
-    0x00,
-    // Cipher suites, we just use TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 (CC A8) for now
-    0x00, 0x02, 0xCC, 0xA8,
-    // Compression methods (no compression)
-    0x01, 0x00,
-    // Extensions length
-    undefined, undefined,
-    // Extension: server name
-    // id, length, length of entry
-    0x00, 0x00, undefined, undefined, undefined, undefined,
-    // entry type, length of bytes
-    0x00, undefined, undefined,
-};
-
-const client_hello_end = [33]u8 {
-    // Extension: supported groups, for now just x25519 (00 1D)
-    0x00, 0x0A, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1D,
-    // Extension: EC point formats => uncompressed point format
-    0x00, 0x0B, 0x00, 0x02, 0x01, 0x00,
-    // Extension: Signature algorithms
-    // RSA/PKCS1/SHA256, RSA/PKCS1/SHA512
-    0x00, 0x0D, 0x00, 0x06, 0x00, 0x04, 0x04, 0x01, 0x06, 0x01,
-    // Extension: Renegotiation Info => new connection
-    0xFF, 0x01, 0x00, 0x01, 0x00,
-    // Extension: SCT (signed certificate timestamp)
-    0x00, 0x12, 0x00, 0x00
-};
-// zig fmt: on
-
 fn handshake_record_length(reader: anytype) !usize {
     return try record_length(0x16, reader);
 }
 
-// Assumes a sha256 reader
-fn record_length(t: u8, reader: anytype) !usize {
+pub fn record_length(t: u8, reader: anytype) !usize {
     try check_record_type(t, reader);
     var record_header: [4]u8 = undefined;
     try reader.readNoEof(&record_header);
@@ -589,12 +549,12 @@ const SignatureAlgorithm = enum {
 };
 
 const ServerCertificate = struct {
-    is_ca: bool,
     bytes: []const u8,
     dn: []const u8,
     public_key: x509.PublicKey,
     signature: asn1.BitString,
     signature_algorithm: SignatureAlgorithm,
+    is_ca: bool,
 };
 
 const VerifierCaptureState = struct {
@@ -781,7 +741,7 @@ pub fn client_connect(
     options.cert_verifier,
     @TypeOf(options.reader),
     @TypeOf(options.writer),
-)!Client(@TypeOf(options.reader), @TypeOf(options.writer)) {
+)!Client(@TypeOf(options.reader), @TypeOf(options.writer), options.ciphersuites) {
     const Options = @TypeOf(options);
     if (@TypeOf(options.cert_verifier) != CertificateVerifier and
         @TypeOf(options.cert_verifier) != @Type(.EnumLiteral))
@@ -813,22 +773,84 @@ pub fn client_connect(
 
     var server_random: [32]u8 = undefined;
 
+    if (options.ciphersuites.len == 0)
+        @compileError("Must provide at least one ciphersuite.");
+    const ciphersuite_bytes = 2 * options.ciphersuites.len;
     {
-        var msg_buf = client_hello_start;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, hostname.len + 0x59));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, hostname.len + 0x55));
+        const client_hello_start = comptime blk: {
+            // TODO: We assume the compiler is running in a little endian system
+            var starting_part: [46]u8 = [_]u8{
+                // Record header: Handshake record type, protocol version, handshake size
+                0x16, 0x03,      0x01,      undefined, undefined,
+                // Handshake message type, bytes of client hello
+                0x01, undefined, undefined, undefined,
+                // Client version (hardcoded to TLS 1.2 even for TLS 1.3)
+                0x03,
+                0x03,
+            } ++ ([1]u8{undefined} ** 32) ++ [_]u8{
+                // Session ID
+                0x00,
+            } ++ mem.toBytes(@byteSwap(u16, ciphersuite_bytes));
+            // using .* = mem.asBytes(...).* or mem.writeIntBig didn't work...
+
+            // Same as above, couldnt achieve this with a single buffer.
+            var ciphersuite_buf: []const u8 = &[0]u8{};
+            for (options.ciphersuites) |cs, i| {
+                // Also check for properties of the ciphersuites here
+                if (cs.key_exchange != .ecdhe)
+                    @compileError("Non ECDHE key exchange is not supported yet.");
+                if (cs.hash != .sha256)
+                    @compileError("Non SHA256 hash algorithm is not supported yet.");
+
+                ciphersuite_buf = ciphersuite_buf ++ mem.toBytes(@byteSwap(u16, cs.tag));
+            }
+
+            var ending_part: [13]u8 = [_]u8{
+                // Compression methods (no compression)
+                0x01,      0x00,
+                // Extensions length
+                undefined, undefined,
+                // Extension: server name
+                // id, length, length of entry
+                0x00,      0x00,
+                undefined, undefined,
+                undefined, undefined,
+                // entry type, length of bytes
+                0x00,      undefined,
+                undefined,
+            };
+            break :blk starting_part ++ ciphersuite_buf ++ ending_part;
+        };
+        var msg_buf = client_hello_start.ptr[0..client_hello_start.len].*;
+        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, hostname.len + 0x57 + ciphersuite_bytes));
+        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, hostname.len + 0x53 + ciphersuite_bytes));
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[50..52], @intCast(u16, hostname.len + 0x2A));
-        mem.writeIntBig(u16, msg_buf[54..56], @intCast(u16, hostname.len + 5));
-        mem.writeIntBig(u16, msg_buf[56..58], @intCast(u16, hostname.len + 3));
-        mem.writeIntBig(u16, msg_buf[59..61], @intCast(u16, hostname.len));
+        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 0x2A));
+        mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 5));
+        mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 3));
+        mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len));
         try writer.writeAll(msg_buf[0..5]);
         try hashing_writer.writeAll(msg_buf[5..]);
     }
     try hashing_writer.writeAll(hostname);
-    try hashing_writer.writeAll(&client_hello_end);
+    try hashing_writer.writeAll(&[33]u8{
+        // Extension: supported groups, for now just x25519 (00 1D)
+        0x00, 0x0A, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1D,
+        // Extension: EC point formats => uncompressed point format
+        0x00, 0x0B, 0x00, 0x02, 0x01, 0x00,
+        // Extension: Signature algorithms
+        // RSA/PKCS1/SHA256, RSA/PKCS1/SHA512
+        0x00, 0x0D,
+        0x00, 0x06, 0x00, 0x04, 0x04, 0x01, 0x06, 0x01,
+        // Extension: Renegotiation Info => new connection
+        0xFF, 0x01, 0x00, 0x01, 0x00,
+        // Extension: SCT (signed certificate timestamp)
+        0x00, 0x12, 0x00,
+        0x00,
+    });
 
     // Read server hello
+    var ciphersuite: u16 = undefined;
     {
         const length = try handshake_record_length(reader);
         if (length < 44)
@@ -848,9 +870,19 @@ pub fn client_connect(
         if (sess_id_len != 0)
             try hashing_reader.skipBytes(sess_id_len, .{});
 
-        // TODO: More cipher suites
-        if (!try hashing_reader.isBytes("\xCC\xA8"))
-            return error.ServerInvalidCipherSuite;
+        {
+            ciphersuite = try hashing_reader.readIntBig(u16);
+            var found = false;
+            inline for (options.ciphersuites) |cs| {
+                if (ciphersuite == cs.tag) {
+                    found = true;
+                    // TODO This segfaults stage1
+                    // break;
+                }
+            }
+            if (!found)
+                return error.ServerInvalidCipherSuite;
+        }
 
         // Compression method
         if ((try hashing_reader.readByte()) != 0x00)
@@ -1019,11 +1051,7 @@ pub fn client_connect(
     }
     // Client encryption keys calculation for ECDHE_RSA cipher suites with SHA256 hash
     var master_secret: [48]u8 = undefined;
-    // No MAC keys for CHACHA20POLY1305
-    var client_key: [32]u8 = undefined;
-    var server_key: [32]u8 = undefined;
-    var client_iv: [12]u8 = undefined;
-    var server_iv: [12]u8 = undefined;
+    var key_data: ciphers.KeyData(options.ciphersuites) = undefined;
     {
         const pre_master_secret = std.crypto.dh.X25519.scalarmult(client_key_pair.secret_key, server_public_key) catch
             return error.X25519MultFailed;
@@ -1055,30 +1083,49 @@ pub fn client_connect(
         seed[45..77].* = client_random;
         a1[32..].* = seed;
         a2[32..].* = seed;
-        // client write key: 32 bytes
-        // server write key: 32 bytes
-        // client write IV: 12 bytes
-        // server write IV: 12 bytes
-        // TOTAL: 88 bytes
-        // We generate 32 bytes of data at a time, so we need 3 rounds for 96 bytes.
-        // Execute two rounds
-        Hmac256.create(a1[0..32], &seed, &master_secret);
-        Hmac256.create(a2[0..32], a1[0..32], &master_secret);
-        Hmac256.create(&p1, &a1, &master_secret);
-        Hmac256.create(&p2, &a2, &master_secret);
-        client_key = p1;
-        server_key = p2;
-        // Last round
-        Hmac256.create(a1[0..32], a2[0..32], &master_secret);
-        Hmac256.create(&p1, &a1, &master_secret);
-        client_iv = p1[0..12].*;
-        server_iv = p1[12..24].*;
+
+        const KeyExpansionState = struct {
+            seed: *const [77]u8,
+            a1: *[32 + seed.len]u8,
+            a2: *[32 + seed.len]u8,
+            master_secret: *const [48]u8,
+        };
+
+        const next_32_bytes = struct {
+            fn f(
+                state: *KeyExpansionState,
+                comptime chunk_idx: comptime_int,
+                chunk: *[32]u8,
+            ) void {
+                if (chunk_idx == 0) {
+                    Hmac256.create(state.a1[0..32], state.seed, state.master_secret);
+                    Hmac256.create(chunk, state.a1, state.master_secret);
+                } else if (chunk_idx % 2 == 1) {
+                    Hmac256.create(state.a2[0..32], state.a1[0..32], state.master_secret);
+                    Hmac256.create(chunk, state.a2, state.master_secret);
+                } else {
+                    Hmac256.create(state.a1[0..32], state.a2[0..32], state.master_secret);
+                    Hmac256.create(chunk, state.a1, state.master_secret);
+                }
+            }
+        }.f;
+        var state = KeyExpansionState{
+            .seed = &seed,
+            .a1 = &a1,
+            .a2 = &a2,
+            .master_secret = &master_secret,
+        };
+
+        key_data = ciphers.key_expansion(options.ciphersuites, ciphersuite, &state, next_32_bytes);
     }
 
     // Client change cipher spec and client handshake finished
     {
-        // https://tools.ietf.org/id/draft-mavrogiannopoulos-chacha-tls-03.html
-
+        try writer.writeAll(&[6]u8{
+            // Client change cipher spec
+            0x14, 0x03, 0x03,
+            0x00, 0x01, 0x01,
+        });
         // The message we need to encrypt is the following:
         // 0x14 0x00 0x00 0x0c
         // <12 bytes of verify_data>
@@ -1105,31 +1152,11 @@ pub fn client_connect(
         }
         handshake_record_hash.update(&verify_message);
 
-        // Encypt the message!
-        var nonce: [12]u8 = client_iv;
-        var additional_data: [13]u8 = undefined;
-        mem.writeIntBig(u64, additional_data[0..8], 0);
-        additional_data[8..13].* = [5]u8{ 0x16, 0x03, 0x03, 0x00, 0x10 };
-
-        var encrypted: [32]u8 = undefined;
-        Chacha20Poly1305.encrypt(
-            encrypted[0..16],
-            encrypted[16..],
-            &verify_message,
-            &additional_data,
-            nonce,
-            client_key,
-        );
-
-        try writer.writeAll(&[11]u8{
-            // Client change cipher spec
-            0x14, 0x03, 0x03,
-            0x00, 0x01, 0x01,
-            // Verify data
-            0x16, 0x03, 0x03,
-            0x00, 0x20,
-        });
-        try writer.writeAll(&encrypted);
+        inline for (options.ciphersuites) |cs| {
+            if (cs.tag == ciphersuite) {
+                try cs.send_verify_message(&key_data, writer, verify_message);
+            }
+        }
     }
 
     // Server change cipher spec
@@ -1142,27 +1169,6 @@ pub fn client_connect(
     // Server handshake finished
     {
         const length = try handshake_record_length(reader);
-
-        if (length != 32)
-            return error.ServerMalformedResponse;
-
-        var msg_in: [32]u8 = undefined;
-        try reader.readNoEof(&msg_in);
-
-        var decrypted: [16]u8 = undefined;
-        const nonce: [12]u8 = server_iv;
-        var additional_data: [13]u8 = undefined;
-        mem.writeIntBig(u64, additional_data[0..8], 0);
-        additional_data[8..13].* = [5]u8{ 0x16, 0x03, 0x03, 0x00, 0x10 };
-
-        Chacha20Poly1305.decrypt(
-            &decrypted,
-            msg_in[0..16],
-            msg_in[16..].*,
-            &additional_data,
-            nonce,
-            server_key,
-        ) catch return error.ServerAuthenticationFailed;
 
         var verify_message: [16]u8 = undefined;
         verify_message[0..4].* = "\x14\x00\x00\x0C".*;
@@ -1177,164 +1183,38 @@ pub fn client_connect(
             Hmac256.create(&p1, &a1, &master_secret);
             verify_message[4..16].* = p1[0..12].*;
         }
-        if (!mem.eql(u8, &decrypted, &verify_message))
-            return error.ServerInvalidVerifyData;
+
+        inline for (options.ciphersuites) |cs| {
+            if (cs.tag == ciphersuite) {
+                if (!try cs.check_verify_message(&key_data, length, reader, verify_message))
+                    return error.ServerInvalidVerifyData;
+            }
+        }
     }
 
-    return Client(@TypeOf(reader), @TypeOf(writer)){
-        .client_key = client_key,
-        .server_key = server_key,
-        .client_iv = client_iv,
-        .server_iv = server_iv,
+    return Client(@TypeOf(reader), @TypeOf(writer), options.ciphersuites){
+        .ciphersuite = ciphersuite,
+        .key_data = key_data,
+        .state = ciphers.client_state_default(options.ciphersuites, ciphersuite),
         .parent_reader = reader,
         .parent_writer = writer,
     };
 }
 
-// @TODO Split into another file
-
-// TODO See stdlib, this is a modified non vectorized implementation
-const ChaCha20Stream = struct {
-    const math = std.math;
-    const BlockVec = [16]u32;
-
-    fn initContext(key: [8]u32, d: [4]u32) BlockVec {
-        const c = "expand 32-byte k";
-        const constant_le = comptime [4]u32{
-            mem.readIntLittle(u32, c[0..4]),
-            mem.readIntLittle(u32, c[4..8]),
-            mem.readIntLittle(u32, c[8..12]),
-            mem.readIntLittle(u32, c[12..16]),
-        };
-        return BlockVec{
-            constant_le[0], constant_le[1], constant_le[2], constant_le[3],
-            key[0],         key[1],         key[2],         key[3],
-            key[4],         key[5],         key[6],         key[7],
-            d[0],           d[1],           d[2],           d[3],
-        };
-    }
-
-    const QuarterRound = struct {
-        a: usize,
-        b: usize,
-        c: usize,
-        d: usize,
-    };
-
-    fn Rp(a: usize, b: usize, c: usize, d: usize) QuarterRound {
-        return QuarterRound{
-            .a = a,
-            .b = b,
-            .c = c,
-            .d = d,
-        };
-    }
-
-    inline fn chacha20Core(x: *BlockVec, input: BlockVec) void {
-        x.* = input;
-
-        const rounds = comptime [_]QuarterRound{
-            Rp(0, 4, 8, 12),
-            Rp(1, 5, 9, 13),
-            Rp(2, 6, 10, 14),
-            Rp(3, 7, 11, 15),
-            Rp(0, 5, 10, 15),
-            Rp(1, 6, 11, 12),
-            Rp(2, 7, 8, 13),
-            Rp(3, 4, 9, 14),
-        };
-
-        comptime var j: usize = 0;
-        inline while (j < 20) : (j += 2) {
-            inline for (rounds) |r| {
-                x[r.a] +%= x[r.b];
-                x[r.d] = math.rotl(u32, x[r.d] ^ x[r.a], @as(u32, 16));
-                x[r.c] +%= x[r.d];
-                x[r.b] = math.rotl(u32, x[r.b] ^ x[r.c], @as(u32, 12));
-                x[r.a] +%= x[r.b];
-                x[r.d] = math.rotl(u32, x[r.d] ^ x[r.a], @as(u32, 8));
-                x[r.c] +%= x[r.d];
-                x[r.b] = math.rotl(u32, x[r.b] ^ x[r.c], @as(u32, 7));
-            }
-        }
-    }
-
-    inline fn hashToBytes(out: *[64]u8, x: BlockVec) void {
-        var i: usize = 0;
-        while (i < 4) : (i += 1) {
-            mem.writeIntLittle(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0]);
-            mem.writeIntLittle(u32, out[16 * i + 4 ..][0..4], x[i * 4 + 1]);
-            mem.writeIntLittle(u32, out[16 * i + 8 ..][0..4], x[i * 4 + 2]);
-            mem.writeIntLittle(u32, out[16 * i + 12 ..][0..4], x[i * 4 + 3]);
-        }
-    }
-
-    inline fn contextFeedback(x: *BlockVec, ctx: BlockVec) void {
-        var i: usize = 0;
-        while (i < 16) : (i += 1) {
-            x[i] +%= ctx[i];
-        }
-    }
-
-    // TODO: Optimize this
-    fn chacha20Xor(out: []u8, in: []const u8, key: [8]u32, ctx: *BlockVec, idx: *usize, buf: *[64]u8) void {
-        var x: BlockVec = undefined;
-
-        const start_idx = idx.*;
-        var i: usize = 0;
-        while (i < in.len) {
-            if (idx.* % 64 == 0) {
-                if (idx.* != 0) {
-                    ctx.*[12] += 1;
-                }
-                chacha20Core(x[0..], ctx.*);
-                contextFeedback(&x, ctx.*);
-                hashToBytes(buf, x);
-            }
-
-            out[i] = in[i] ^ buf[idx.* % 64];
-
-            i += 1;
-            idx.* += 1;
-        }
-    }
-};
-
-fn keyToWords(key: [32]u8) [8]u32 {
-    var k: [8]u32 = undefined;
-    var i: usize = 0;
-    while (i < 8) : (i += 1) {
-        k[i] = mem.readIntLittle(u32, key[i * 4 ..][0..4]);
-    }
-    return k;
-}
-
-pub fn Client(comptime _Reader: type, comptime _Writer: type) type {
+pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersuites: anytype) type {
     return struct {
-        const internal_buffer_size = 4 * 1024;
         const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion };
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
         pub const Writer = std.io.Writer(*@This(), _Writer.Error, write);
 
+        ciphersuite: u16,
         client_seq: u64 = 1,
         server_seq: u64 = 1,
-        server_iv: [12]u8,
-        client_iv: [12]u8,
-        client_key: [32]u8,
-        server_key: [32]u8,
+        key_data: ciphers.KeyData(ciphersuites),
+        state: ciphers.ClientState(ciphersuites),
 
         parent_reader: _Reader,
         parent_writer: _Writer,
-
-        reader_state: union(enum) {
-            in_record: struct {
-                left: usize,
-                context: ChaCha20Stream.BlockVec,
-                idx: usize,
-                buf: [64]u8,
-            },
-            none,
-        } = .none,
 
         pub fn reader(self: *@This()) Reader {
             return .{ .context = self };
@@ -1345,156 +1225,47 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type) type {
         }
 
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
-            switch (self.reader_state) {
-                .none => {
-                    const len = (record_length(0x17, self.parent_reader) catch |err| switch (err) {
-                        error.EndOfStream => return 0,
-                        else => |e| return e,
-                    }) - 16;
-
-                    const curr_bytes = std.math.min(std.math.min(len, internal_buffer_size), buffer.len);
-
-                    var nonce: [12]u8 = undefined;
-                    nonce[0..4].* = mem.zeroes([4]u8);
-                    mem.writeIntBig(u64, nonce[4..12], self.server_seq);
-                    for (nonce) |*n, i| {
-                        n.* ^= self.server_iv[i];
-                    }
-
-                    // Partially decrypt the data.
-                    var encrypted: [internal_buffer_size]u8 = undefined;
-                    const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
-
-                    var c: [4]u32 = undefined;
-                    c[0] = 1;
-                    c[1] = mem.readIntLittle(u32, nonce[0..4]);
-                    c[2] = mem.readIntLittle(u32, nonce[4..8]);
-                    c[3] = mem.readIntLittle(u32, nonce[8..12]);
-                    const server_key = keyToWords(self.server_key);
-                    var context = ChaCha20Stream.initContext(server_key, c);
-                    var idx: usize = 0;
-                    var buf: [64]u8 = undefined;
-                    ChaCha20Stream.chacha20Xor(
-                        buffer[0..actually_read],
-                        encrypted[0..actually_read],
-                        server_key,
-                        &context,
-                        &idx,
-                        &buf,
+            inline for (ciphersuites) |cs| {
+                if (self.ciphersuite == cs.tag) {
+                    return try cs.read(
+                        &@field(self.state, cs.name),
+                        &self.key_data,
+                        self.parent_reader,
+                        &self.server_seq,
+                        buffer,
                     );
-                    if (actually_read < len) {
-                        self.reader_state = .{
-                            .in_record = .{
-                                .left = len - actually_read,
-                                .context = context,
-                                .idx = idx,
-                                .buf = buf,
-                            },
-                        };
-                    } else {
-                        // @TODO Verify Poly1305.
-                        self.parent_reader.skipBytes(16, .{}) catch |err| switch (err) {
-                            error.EndOfStream => return 0,
-                            else => |e| return e,
-                        };
-                        self.server_seq += 1;
-                    }
-                    return actually_read;
-                },
-                .in_record => |*record_info| {
-                    const curr_bytes = std.math.min(std.math.min(internal_buffer_size, buffer.len), record_info.left);
-                    // Partially decrypt the data.
-                    var encrypted: [internal_buffer_size]u8 = undefined;
-                    const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
-                    ChaCha20Stream.chacha20Xor(
-                        buffer[0..actually_read],
-                        encrypted[0..actually_read],
-                        keyToWords(self.server_key),
-                        &record_info.context,
-                        &record_info.idx,
-                        &record_info.buf,
-                    );
-
-                    record_info.left -= actually_read;
-                    if (record_info.left == 0) {
-                        // @TODO Verify Poly1305.
-                        self.parent_reader.skipBytes(16, .{}) catch |err| switch (err) {
-                            error.EndOfStream => return 0,
-                            else => |e| return e,
-                        };
-                        self.reader_state = .none;
-                        self.server_seq += 1;
-                    }
-                    return actually_read;
-                },
+                }
             }
+            unreachable;
         }
 
         pub fn write(self: *@This(), buffer: []const u8) _Writer.Error!usize {
-            if (buffer.len == 0) return 0;
-
-            const curr_bytes = @truncate(u16, std.math.min(buffer.len, internal_buffer_size));
-            var encrypted_data: [internal_buffer_size]u8 = undefined;
-            var tag_data: [16]u8 = undefined;
-
-            try self.parent_writer.writeAll(&[3]u8{ 0x17, 0x03, 0x03 });
-            try self.parent_writer.writeIntBig(u16, curr_bytes + 16);
-
-            var nonce: [12]u8 = undefined;
-            nonce[0..4].* = mem.zeroes([4]u8);
-            mem.writeIntBig(u64, nonce[4..12], self.client_seq);
-            for (nonce) |*n, i| {
-                n.* ^= self.client_iv[i];
+            inline for (ciphersuites) |cs| {
+                if (self.ciphersuite == cs.tag) {
+                    return try cs.write(
+                        &@field(self.state, cs.name),
+                        &self.key_data,
+                        self.parent_writer,
+                        &self.client_seq,
+                        buffer,
+                    );
+                }
             }
-
-            var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], self.client_seq);
-            additional_data[8..11].* = [3]u8{ 0x17, 0x03, 0x03 };
-            mem.writeIntBig(u16, additional_data[11..], curr_bytes);
-
-            Chacha20Poly1305.encrypt(
-                encrypted_data[0..curr_bytes],
-                &tag_data,
-                buffer[0..curr_bytes],
-                &additional_data,
-                nonce,
-                self.client_key,
-            );
-            try self.parent_writer.writeAll(encrypted_data[0..curr_bytes]);
-            try self.parent_writer.writeAll(&tag_data);
-
-            self.client_seq += 1;
-            return curr_bytes;
+            unreachable;
         }
 
         pub fn close_notify(self: *@This()) !void {
-            try self.writer().writeAll(&[5]u8{
-                0x15, 0x03, 0x03, 0x00, 0x12,
-            });
-
-            var encrypted_data: [2]u8 = undefined;
-            var tag_data: [16]u8 = undefined;
-            var nonce: [12]u8 = undefined;
-
-            nonce[0..4].* = mem.zeroes([4]u8);
-            mem.writeIntBig(u64, nonce[4..12], self.client_seq);
-            for (nonce) |*n, i| {
-                n.* ^= self.client_iv[i];
+            inline for (ciphersuites) |cs| {
+                if (self.ciphersuite == cs.tag) {
+                    return try cs.close_notify(
+                        &@field(self.state, cs.name),
+                        &self.key_data,
+                        self.parent_writer,
+                        &self.client_seq,
+                    );
+                }
             }
-
-            var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], self.client_seq);
-            additional_data[8..13].* = [5]u8{ 0x15, 0x03, 0x03, 0x00, 0x02 };
-
-            Chacha20Poly1305.encrypt(
-                &encrypted_data,
-                &tag_data,
-                "\x01\x00",
-                &additional_data,
-                nonce,
-                self.client_key,
-            );
-            self.client_seq += 1;
+            unreachable;
         }
     };
 }
@@ -1513,6 +1284,7 @@ test "HTTPS request on wikipedia main page" {
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
+        .ciphersuites = all_ciphersuites,
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
 
