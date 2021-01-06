@@ -1154,7 +1154,15 @@ pub fn client_connect(
 
         inline for (options.ciphersuites) |cs| {
             if (cs.tag == ciphersuite) {
-                try cs.send_verify_message(&key_data, writer, verify_message);
+                try cs.raw_write(
+                    256,
+                    rand,
+                    &key_data,
+                    writer,
+                    [3]u8{ 0x16, 0x03, 0x03 },
+                    0,
+                    &verify_message,
+                );
             }
         }
     }
@@ -1196,6 +1204,7 @@ pub fn client_connect(
         .ciphersuite = ciphersuite,
         .key_data = key_data,
         .state = ciphers.client_state_default(options.ciphersuites, ciphersuite),
+        .rand = rand,
         .parent_reader = reader,
         .parent_writer = writer,
     };
@@ -1212,6 +1221,7 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersui
         server_seq: u64 = 1,
         key_data: ciphers.KeyData(ciphersuites),
         state: ciphers.ClientState(ciphersuites),
+        rand: *std.rand.Random,
 
         parent_reader: _Reader,
         parent_writer: _Writer,
@@ -1227,7 +1237,9 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersui
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
             inline for (ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
+                    // @TODO Make this buffer size configurable
                     return try cs.read(
+                        1024,
                         &@field(self.state, cs.name),
                         &self.key_data,
                         self.parent_reader,
@@ -1240,15 +1252,23 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersui
         }
 
         pub fn write(self: *@This(), buffer: []const u8) _Writer.Error!usize {
+            if (buffer.len == 0) return 0;
+
             inline for (ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
-                    return try cs.write(
-                        &@field(self.state, cs.name),
+                    // @TODO Make this buffer size configurable
+                    const curr_bytes = @truncate(u16, std.math.min(buffer.len, 1024));
+                    try cs.raw_write(
+                        1024,
+                        self.rand,
                         &self.key_data,
                         self.parent_writer,
-                        &self.client_seq,
-                        buffer,
+                        [3]u8{ 0x17, 0x03, 0x03 },
+                        self.client_seq,
+                        buffer[0..curr_bytes],
                     );
+                    self.client_seq += 1;
+                    return curr_bytes;
                 }
             }
             unreachable;
@@ -1257,12 +1277,17 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersui
         pub fn close_notify(self: *@This()) !void {
             inline for (ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
-                    return try cs.close_notify(
-                        &@field(self.state, cs.name),
+                    try cs.raw_write(
+                        1024,
+                        self.rand,
                         &self.key_data,
                         self.parent_writer,
-                        &self.client_seq,
+                        [3]u8{ 0x15, 0x03, 0x03 },
+                        self.client_seq,
+                        "\x01\x00",
                     );
+                    self.client_seq += 1;
+                    return;
                 }
             }
             unreachable;
@@ -1323,9 +1348,11 @@ test "HTTPS request on wikipedia main page" {
 //     defer sock.close();
 
 //     var client = try client_connect(.{
+//         .temp_allocator = std.testing.allocator,
 //         .reader = sock.reader(),
 //         .writer = sock.writer(),
 //         .cert_verifier = .none,
+//         .ciphersuites = all_ciphersuites,
 //     }, "id.twitch.tv");
 //     defer client.close_notify() catch {};
 

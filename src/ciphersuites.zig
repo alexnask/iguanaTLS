@@ -3,6 +3,7 @@ const mem = std.mem;
 
 usingnamespace @import("crypto.zig");
 const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
+const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 const record_length = @import("main.zig").record_length;
 
 pub const suites = struct {
@@ -20,19 +21,26 @@ pub const suites = struct {
         };
 
         pub const State = union(enum) {
+            none,
             in_record: struct {
                 left: usize,
                 context: ChaCha20Stream.BlockVec,
                 idx: usize,
                 buf: [64]u8,
             },
-            none,
         };
         pub const default_state: State = .none;
 
-        const internal_buffer_size = 4 * 1024;
-        fn raw_write(key_data: anytype, writer: anytype, prefix: [3]u8, seq: u64, buffer: []const u8) !void {
-            std.debug.assert(buffer.len <= internal_buffer_size);
+        pub fn raw_write(
+            comptime buffer_size: usize,
+            rand: *std.rand.Random,
+            key_data: anytype,
+            writer: anytype,
+            prefix: [3]u8,
+            seq: u64,
+            buffer: []const u8,
+        ) !void {
+            std.debug.assert(buffer.len <= buffer_size);
             try writer.writeAll(&prefix);
             try writer.writeIntBig(u16, @intCast(u16, buffer.len + 16));
 
@@ -41,7 +49,7 @@ pub const suites = struct {
             additional_data[8..11].* = prefix;
             mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
 
-            var encrypted_data: [internal_buffer_size]u8 = undefined;
+            var encrypted_data: [buffer_size]u8 = undefined;
             var tag_data: [16]u8 = undefined;
 
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
@@ -60,20 +68,6 @@ pub const suites = struct {
             );
             try writer.writeAll(encrypted_data[0..buffer.len]);
             try writer.writeAll(&tag_data);
-        }
-
-        pub fn send_verify_message(key_data: anytype, writer: anytype, verify_message: [16]u8) !void {
-            try raw_write(key_data, writer, [3]u8{ 0x16, 0x03, 0x03 }, 0, &verify_message);
-        }
-
-        pub fn close_notify(
-            state: *State,
-            key_data: anytype,
-            writer: anytype,
-            client_seq: *u64,
-        ) !void {
-            try raw_write(key_data, writer, [3]u8{ 0x15, 0x03, 0x03 }, client_seq.*, "\x01\x00");
-            client_seq.* += 1;
         }
 
         pub fn check_verify_message(
@@ -102,21 +96,8 @@ pub const suites = struct {
             return mem.eql(u8, &decrypted, &verify_message);
         }
 
-        pub fn write(
-            state: *State,
-            key_data: anytype,
-            writer: anytype,
-            client_seq: *u64,
-            buffer: []const u8,
-        ) !usize {
-            if (buffer.len == 0) return 0;
-            const curr_bytes = @truncate(u16, std.math.min(buffer.len, internal_buffer_size));
-            try raw_write(key_data, writer, [3]u8{ 0x17, 0x03, 0x03 }, client_seq.*, buffer[0..curr_bytes]);
-            client_seq.* += 1;
-            return curr_bytes;
-        }
-
         pub fn read(
+            comptime buf_size: usize,
             state: *State,
             key_data: anytype,
             reader: anytype,
@@ -130,7 +111,7 @@ pub const suites = struct {
                         else => |e| return e,
                     }) - 16;
 
-                    const curr_bytes = std.math.min(std.math.min(len, internal_buffer_size), buffer.len);
+                    const curr_bytes = std.math.min(std.math.min(len, buf_size), buffer.len);
 
                     var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
                     mem.writeIntBig(u64, nonce[4..12], server_seq.*);
@@ -139,7 +120,7 @@ pub const suites = struct {
                     }
 
                     // Partially decrypt the data.
-                    var encrypted: [internal_buffer_size]u8 = undefined;
+                    var encrypted: [buf_size]u8 = undefined;
                     const actually_read = try reader.read(encrypted[0..curr_bytes]);
 
                     var c: [4]u32 = undefined;
@@ -179,9 +160,9 @@ pub const suites = struct {
                     return actually_read;
                 },
                 .in_record => |*record_info| {
-                    const curr_bytes = std.math.min(std.math.min(internal_buffer_size, buffer.len), record_info.left);
+                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), record_info.left);
                     // Partially decrypt the data.
-                    var encrypted: [internal_buffer_size]u8 = undefined;
+                    var encrypted: [buf_size]u8 = undefined;
                     const actually_read = try reader.read(encrypted[0..curr_bytes]);
                     ChaCha20Stream.chacha20Xor(
                         buffer[0..actually_read],
@@ -208,7 +189,198 @@ pub const suites = struct {
         }
     };
 
-    pub const all_ciphersuites = &[_]type{ECDHE_RSA_Chacha20_Poly1305};
+    pub const ECDHE_RSA_AES128_GCM_SHA256 = struct {
+        pub const name = "ECDHE-RSA-AES128-GCM-SHA256";
+        pub const tag = 0xC02F;
+        pub const key_exchange = .ecdhe;
+        pub const hash = .sha256;
+
+        pub const Keys = struct {
+            client_key: [16]u8,
+            server_key: [16]u8,
+            client_iv: [4]u8,
+            server_iv: [4]u8,
+        };
+
+        const Aes = std.crypto.core.aes.Aes128;
+        pub const State = union(enum) {
+            none,
+            in_record: struct {
+                left: usize,
+                aes: @typeInfo(@TypeOf(Aes.initEnc)).Fn.return_type.?,
+                // ctr state
+                counterInt: u128,
+                idx: usize,
+            },
+        };
+        pub const default_state: State = .none;
+
+        pub fn check_verify_message(
+            key_data: anytype,
+            length: usize,
+            reader: anytype,
+            verify_message: [16]u8,
+        ) !bool {
+            if (length != 40)
+                return false;
+
+            var iv: [12]u8 = undefined;
+            iv[0..4].* = key_data.server_iv(@This()).*;
+            try reader.readNoEof(iv[4..12]);
+
+            var msg_in: [32]u8 = undefined;
+            try reader.readNoEof(&msg_in);
+
+            const additional_data: [13]u8 = ([1]u8{0} ** 8) ++ [5]u8{ 0x16, 0x03, 0x03, 0x00, 0x10 };
+            var decrypted: [16]u8 = undefined;
+            Aes128Gcm.decrypt(
+                &decrypted,
+                msg_in[0..16],
+                msg_in[16..].*,
+                &additional_data,
+                iv,
+                key_data.server_key(@This()).*,
+            ) catch return false;
+
+            return mem.eql(u8, &decrypted, &verify_message);
+        }
+
+        pub fn raw_write(
+            comptime buffer_size: usize,
+            rand: *std.rand.Random,
+            key_data: anytype,
+            writer: anytype,
+            prefix: [3]u8,
+            seq: u64,
+            buffer: []const u8,
+        ) !void {
+            std.debug.assert(buffer.len <= buffer_size);
+            var iv: [12]u8 = undefined;
+            iv[0..4].* = key_data.client_iv(@This()).*;
+            rand.bytes(iv[4..12]);
+
+            var additional_data: [13]u8 = undefined;
+            mem.writeIntBig(u64, additional_data[0..8], seq);
+            additional_data[8..11].* = prefix;
+            mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
+
+            try writer.writeAll(&prefix);
+            try writer.writeIntBig(u16, @intCast(u16, buffer.len + 24));
+            try writer.writeAll(iv[4..12]);
+
+            var encrypted_data: [buffer_size]u8 = undefined;
+            var tag_data: [16]u8 = undefined;
+
+            Aes128Gcm.encrypt(
+                encrypted_data[0..buffer.len],
+                &tag_data,
+                buffer,
+                &additional_data,
+                iv,
+                key_data.client_key(@This()).*,
+            );
+            try writer.writeAll(encrypted_data[0..buffer.len]);
+            try writer.writeAll(&tag_data);
+        }
+
+        pub fn read(
+            comptime buf_size: usize,
+            state: *State,
+            key_data: anytype,
+            reader: anytype,
+            server_seq: *u64,
+            buffer: []u8,
+        ) !usize {
+            switch (state.*) {
+                .none => {
+                    const len = (record_length(0x17, reader) catch |err| switch (err) {
+                        error.EndOfStream => return 0,
+                        else => |e| return e,
+                    }) - 24;
+
+                    const curr_bytes = std.math.min(std.math.min(len, buf_size), buffer.len);
+
+                    var iv: [12]u8 = undefined;
+                    iv[0..4].* = key_data.server_iv(@This()).*;
+                    reader.readNoEof(iv[4..12]) catch |err| switch (err) {
+                        error.EndOfStream => return 0,
+                        else => |e| return e,
+                    };
+
+                    // Partially decrypt the data.
+                    var encrypted: [buf_size]u8 = undefined;
+                    const actually_read = try reader.read(encrypted[0..curr_bytes]);
+
+                    const aes = Aes.initEnc(key_data.server_key(@This()).*);
+
+                    var j: [16]u8 = undefined;
+                    mem.copy(u8, j[0..12], iv[0..]);
+                    mem.writeIntBig(u32, j[12..][0..4], 2);
+
+                    var counterInt = mem.readInt(u128, &j, .Big);
+                    var idx: usize = 0;
+
+                    ctr(
+                        @TypeOf(aes),
+                        aes,
+                        buffer[0..actually_read],
+                        encrypted[0..actually_read],
+                        &counterInt,
+                        &idx,
+                        .Big,
+                    );
+
+                    if (actually_read < len) {
+                        state.* = .{
+                            .in_record = .{
+                                .left = len - actually_read,
+                                .aes = aes,
+                                .counterInt = counterInt,
+                                .idx = idx,
+                            },
+                        };
+                    } else {
+                        // @TODO Verify the message
+                        reader.skipBytes(16, .{}) catch |err| switch (err) {
+                            error.EndOfStream => return 0,
+                            else => |e| return e,
+                        };
+                        server_seq.* += 1;
+                    }
+                    return actually_read;
+                },
+                .in_record => |*record_info| {
+                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), record_info.left);
+                    // Partially decrypt the data.
+                    var encrypted: [buf_size]u8 = undefined;
+                    const actually_read = try reader.read(encrypted[0..curr_bytes]);
+
+                    ctr(
+                        @TypeOf(record_info.aes),
+                        record_info.aes,
+                        buffer[0..actually_read],
+                        encrypted[0..actually_read],
+                        &record_info.counterInt,
+                        &record_info.idx,
+                        .Big,
+                    );
+                    record_info.left -= actually_read;
+                    if (record_info.left == 0) {
+                        // @TODO Verify Poly1305.
+                        reader.skipBytes(16, .{}) catch |err| switch (err) {
+                            error.EndOfStream => return 0,
+                            else => |e| return e,
+                        };
+                        state.* = .none;
+                        server_seq.* += 1;
+                    }
+                    return actually_read;
+                },
+            }
+        }
+    };
+
+    pub const all_ciphersuites = &[_]type{ECDHE_RSA_AES128_GCM_SHA256};
 };
 
 fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
