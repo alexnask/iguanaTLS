@@ -185,6 +185,7 @@ pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reade
         ServerInvalidCompressionMethod,
         ServerInvalidRenegotiationData,
         ServerInvalidECPointCompression,
+        ServerInvalidProtocol,
         ServerInvalidExtension,
         ServerInvalidCurve,
         ServerInvalidSignature,
@@ -741,7 +742,12 @@ pub fn client_connect(
     options.cert_verifier,
     @TypeOf(options.reader),
     @TypeOf(options.writer),
-)!Client(@TypeOf(options.reader), @TypeOf(options.writer), options.ciphersuites) {
+)!Client(
+    @TypeOf(options.reader),
+    @TypeOf(options.writer),
+    options.ciphersuites,
+    @hasField(@TypeOf(options), "protocols"),
+) {
     const Options = @TypeOf(options);
     if (@TypeOf(options.cert_verifier) != CertificateVerifier and
         @TypeOf(options.cert_verifier) != @Type(.EnumLiteral))
@@ -753,6 +759,8 @@ pub fn client_connect(
         if (!@hasField(Options, "trusted_certificates"))
             @compileError("Option tuple is missing field 'trusted_certificates' for .default cert_verifier");
     }
+
+    const has_alpn = comptime @hasField(Options, "protocols");
 
     // @TODO Things like supported cipher suites, compression methods, extensions as comptime here?
     // @TODO Comptime slice of supported cipher suites, generate the handshake accordingly at comptime.
@@ -775,7 +783,16 @@ pub fn client_connect(
 
     if (options.ciphersuites.len == 0)
         @compileError("Must provide at least one ciphersuite.");
-    const ciphersuite_bytes = 2 * options.ciphersuites.len;
+    const ciphersuite_bytes = 2 * options.ciphersuites.len + 2;
+    // @TODO Make sure the individual lengths are u16s
+    const alpn_bytes = if (has_alpn) blk: {
+        var sum: usize = 0;
+        for (options.protocols) |proto| {
+            sum += proto.len;
+        }
+        break :blk 6 + options.protocols.len + sum;
+    } else 0;
+    var protocol: if (has_alpn) []const u8 else void = undefined;
     {
         const client_hello_start = comptime blk: {
             // TODO: We assume the compiler is running in a little endian system
@@ -794,7 +811,8 @@ pub fn client_connect(
             // using .* = mem.asBytes(...).* or mem.writeIntBig didn't work...
 
             // Same as above, couldnt achieve this with a single buffer.
-            var ciphersuite_buf: []const u8 = &[0]u8{};
+            // TLS_EMPTY_RENEGOTIATION_INFO_SCSV
+            var ciphersuite_buf: []const u8 = &[2]u8{ 0x00, 0x0f };
             for (options.ciphersuites) |cs, i| {
                 // Also check for properties of the ciphersuites here
                 if (cs.key_exchange != .ecdhe)
@@ -821,11 +839,12 @@ pub fn client_connect(
             };
             break :blk starting_part ++ ciphersuite_buf ++ ending_part;
         };
+
         var msg_buf = client_hello_start.ptr[0..client_hello_start.len].*;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, hostname.len + 0x57 + ciphersuite_bytes));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, hostname.len + 0x53 + ciphersuite_bytes));
+        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x57 + ciphersuite_bytes));
+        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x53 + ciphersuite_bytes));
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 0x2A));
+        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, alpn_bytes + hostname.len + 0x2A));
         mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 5));
         mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 3));
         mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len));
@@ -833,6 +852,17 @@ pub fn client_connect(
         try hashing_writer.writeAll(msg_buf[5..]);
     }
     try hashing_writer.writeAll(hostname);
+    // @TODO Fix this with wikipedia test, add secp384r1 support (then app options.curves but default to all when not there (also do this for ciphersuites))
+    if (has_alpn) {
+        var msg_buf = [6]u8{ 0x00, 0x10, undefined, undefined, undefined, undefined };
+        mem.writeIntBig(u16, msg_buf[2..4], @intCast(u16, alpn_bytes - 4));
+        mem.writeIntBig(u16, msg_buf[4..6], @intCast(u16, alpn_bytes - 6));
+        try hashing_writer.writeAll(&msg_buf);
+        for (options.protocols) |proto| {
+            try hashing_writer.writeByte(@intCast(u8, proto.len));
+            try hashing_writer.writeAll(proto);
+        }
+    }
     try hashing_writer.writeAll(&[33]u8{
         // Extension: supported groups, for now just x25519 (00 1D)
         0x00, 0x0A, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1D,
@@ -916,6 +946,22 @@ pub fn client_connect(
                 }
                 if (!found_uncompressed)
                     return error.ServerInvalidECPointCompression;
+            } else if (has_alpn and ext_tag[0] == 0x00 and ext_tag[1] == 0x10) {
+                const alpn_ext_len = try hashing_reader.readIntBig(u16);
+                if (alpn_ext_len != ext_len - 2)
+                    return error.ServerMalformedResponse;
+                const str_len = try hashing_reader.readByte();
+                var buf: [256]u8 = undefined;
+                try hashing_reader.readNoEof(buf[0..str_len]);
+                const found = for (options.protocols) |proto| {
+                    if (mem.eql(u8, proto, buf[0..str_len])) {
+                        protocol = proto;
+                        break true;
+                    }
+                } else false;
+                if (!found)
+                    return error.ServerInvalidProtocol;
+                try hashing_reader.skipBytes(alpn_ext_len - str_len - 1, .{});
             } else return error.ServerInvalidExtension;
         }
         if (ext_byte_idx != exts_length)
@@ -923,7 +969,6 @@ pub fn client_connect(
     }
     // Read server certificates
     var certificate_public_key: x509.PublicKey = undefined;
-    errdefer certificate_public_key.deinit(options.temp_allocator);
     {
         const length = try handshake_record_length(reader);
         {
@@ -958,6 +1003,7 @@ pub fn client_connect(
             ),
         }
     }
+    errdefer certificate_public_key.deinit(options.temp_allocator);
     // Read server ephemeral public key
     var server_public_key: [32]u8 = undefined;
     {
@@ -1200,17 +1246,23 @@ pub fn client_connect(
         }
     }
 
-    return Client(@TypeOf(reader), @TypeOf(writer), options.ciphersuites){
+    return Client(@TypeOf(reader), @TypeOf(writer), options.ciphersuites, has_alpn){
         .ciphersuite = ciphersuite,
         .key_data = key_data,
         .state = ciphers.client_state_default(options.ciphersuites, ciphersuite),
         .rand = rand,
         .parent_reader = reader,
         .parent_writer = writer,
+        .protocol = protocol,
     };
 }
 
-pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersuites: anytype) type {
+pub fn Client(
+    comptime _Reader: type,
+    comptime _Writer: type,
+    comptime ciphersuites: anytype,
+    comptime has_protocol: bool,
+) type {
     return struct {
         const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion };
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
@@ -1225,6 +1277,8 @@ pub fn Client(comptime _Reader: type, comptime _Writer: type, comptime ciphersui
 
         parent_reader: _Reader,
         parent_writer: _Writer,
+
+        protocol: if (has_protocol) []const u8 else void,
 
         pub fn reader(self: *@This()) Reader {
             return .{ .context = self };
@@ -1310,9 +1364,11 @@ test "HTTPS request on wikipedia main page" {
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
         .ciphersuites = all_ciphersuites,
+        // .protocols = &[_][]const u8{"http/1.1"},
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
 
+    // std.testing.expectEqualStrings("http/1.1", client.protocol);
     try client.writer().writeAll("GET /wiki/Main_Page HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 
     {
@@ -1353,6 +1409,7 @@ test "HTTPS request on wikipedia main page" {
 //         .writer = sock.writer(),
 //         .cert_verifier = .none,
 //         .ciphersuites = all_ciphersuites,
+//         .protocols = &[_][]const u8{"http/1.1"},
 //     }, "id.twitch.tv");
 //     defer client.close_notify() catch {};
 

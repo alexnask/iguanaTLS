@@ -380,7 +380,7 @@ pub const suites = struct {
         }
     };
 
-    pub const all_ciphersuites = &[_]type{ECDHE_RSA_Chacha20_Poly1305, ECDHE_RSA_AES128_GCM_SHA256};
+    pub const all_ciphersuites = &[_]type{ ECDHE_RSA_Chacha20_Poly1305, ECDHE_RSA_AES128_GCM_SHA256 };
 };
 
 fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
