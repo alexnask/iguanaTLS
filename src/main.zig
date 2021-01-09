@@ -8,13 +8,15 @@ const Hmac256 = std.crypto.auth.hmac.sha2.HmacSha256;
 
 pub const asn1 = @import("asn1.zig");
 pub const x509 = @import("x509.zig");
+pub const crypto = @import("crypto.zig");
 
 const ciphers = @import("ciphersuites.zig");
-pub usingnamespace ciphers.suites;
+pub const ciphersuites = ciphers.suites;
 
 comptime {
     std.testing.refAllDecls(x509);
     std.testing.refAllDecls(asn1);
+    std.testing.refAllDecls(crypto);
 }
 
 fn handshake_record_length(reader: anytype) !usize {
@@ -190,10 +192,9 @@ pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reade
         ServerInvalidCurve,
         ServerInvalidSignature,
         ServerInvalidSignatureAlgorithm,
-        X25519KeyPairCreateFailed,
-        X25519MultFailed,
         ServerAuthenticationFailed,
         ServerInvalidVerifyData,
+        PreMasterGenerationFailed,
         OutOfMemory,
     };
     const err_msg = "Certificate verifier function cannot be generic, use CertificateVerifierReader to get the reader argument type";
@@ -761,10 +762,6 @@ pub fn client_connect(
     }
 
     const has_alpn = comptime @hasField(Options, "protocols");
-
-    // @TODO Things like supported cipher suites, compression methods, extensions as comptime here?
-    // @TODO Comptime slice of supported cipher suites, generate the handshake accordingly at comptime.
-
     var handshake_record_hash = Sha256.init(.{});
     const reader = options.reader;
     const writer = options.writer;
@@ -841,10 +838,10 @@ pub fn client_connect(
         };
 
         var msg_buf = client_hello_start.ptr[0..client_hello_start.len].*;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x57 + ciphersuite_bytes));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x53 + ciphersuite_bytes));
+        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x59 + ciphersuite_bytes));
+        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes));
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, alpn_bytes + hostname.len + 0x2A));
+        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, alpn_bytes + hostname.len + 0x2C));
         mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 5));
         mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 3));
         mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len));
@@ -863,20 +860,20 @@ pub fn client_connect(
             try hashing_writer.writeAll(proto);
         }
     }
-    try hashing_writer.writeAll(&[33]u8{
-        // Extension: supported groups, for now just x25519 (00 1D)
-        0x00, 0x0A, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1D,
+    try hashing_writer.writeAll(&[35]u8{
+        // Extension: supported groups, for now just x25519 (00 1D) and secp384r1 (00 0x18)
+        0x00, 0x0A, 0x00, 0x06, 0x00, 0x04, 0x00, 0x1D, 0x00, 0x18,
         // Extension: EC point formats => uncompressed point format
         0x00, 0x0B, 0x00, 0x02, 0x01, 0x00,
         // Extension: Signature algorithms
         // RSA/PKCS1/SHA256, RSA/PKCS1/SHA512
-        0x00, 0x0D,
-        0x00, 0x06, 0x00, 0x04, 0x04, 0x01, 0x06, 0x01,
+        0x00, 0x0D, 0x00, 0x06,
+        0x00, 0x04, 0x04, 0x01, 0x06, 0x01,
         // Extension: Renegotiation Info => new connection
-        0xFF, 0x01, 0x00, 0x01, 0x00,
-        // Extension: SCT (signed certificate timestamp)
-        0x00, 0x12, 0x00,
+        0xFF, 0x01, 0x00, 0x01,
         0x00,
+        // Extension: SCT (signed certificate timestamp)
+        0x00, 0x12, 0x00, 0x00,
     });
 
     // Read server hello
@@ -1005,7 +1002,8 @@ pub fn client_connect(
     }
     errdefer certificate_public_key.deinit(options.temp_allocator);
     // Read server ephemeral public key
-    var server_public_key: [32]u8 = undefined;
+    var server_public_key_buf: [97]u8 = undefined;
+    var curve_id: enum { x25519, secp384r1 } = undefined;
     {
         const length = try handshake_record_length(reader);
         {
@@ -1014,15 +1012,24 @@ pub fn client_connect(
             if (handshake_header[0] != 0x0c)
                 return error.ServerMalformedResponse;
 
-            // Only x25519 supported for now.
-            if (!try hashing_reader.isBytes("\x03\x00\x1D"))
+            // Only x25519 and secp384r1 supported for now.
+            var curve_bytes: [3]u8 = undefined;
+            try hashing_reader.readNoEof(&curve_bytes);
+            curve_id = if (mem.eql(u8, &curve_bytes, "\x03\x00\x1D"))
+                .x25519
+            else if (mem.eql(u8, &curve_bytes, "\x03\x00\x18"))
+                .secp384r1
+            else
                 return error.ServerInvalidCurve;
         }
 
         const pub_key_len = try hashing_reader.readByte();
-        if (pub_key_len != 32)
+        if ((curve_id == .x25519 and pub_key_len != 32) or
+            (curve_id == .secp384r1 and pub_key_len != 97))
             return error.ServerMalformedResponse;
-        try hashing_reader.readNoEof(&server_public_key);
+        try hashing_reader.readNoEof(server_public_key_buf[0..pub_key_len]);
+        if (curve_id == .secp384r1 and server_public_key_buf[0] != 0x04)
+            return error.ServerMalformedResponse;
 
         // Signed public key
         const signature_id = try hashing_reader.readIntBig(u16);
@@ -1033,27 +1040,29 @@ pub fn client_connect(
         const signature_algoritm: SignatureAlgorithm = switch (signature_id) {
             // RSA/PKCS1/SHA256
             0x0401 => block: {
-                if (signature_len != 256)
-                    return error.ServerMalformedResponse;
-
                 var sha256 = Sha256.init(.{});
                 sha256.update(&client_random);
                 sha256.update(&server_random);
-                sha256.update("\x03\x00\x1D\x20");
-                sha256.update(&server_public_key);
+                switch (curve_id) {
+                    .x25519 => sha256.update("\x03\x00\x1D\x20"),
+                    .secp384r1 => sha256.update("\x03\x00\x18\x20"),
+                }
+                sha256.update(server_public_key_buf[0..pub_key_len]);
                 sha256.final(hash_buf[0..32]);
                 hash = hash_buf[0..32];
                 break :block .rsa_sha256;
             },
             // RSA/PKCS1/SHA512
             0x0601 => block: {
-                if (signature_len != 512)
-                    return error.ServerMalformedResponse;
                 var sha512 = Sha512.init(.{});
                 sha512.update(&client_random);
                 sha512.update(&server_random);
-                sha512.update("\x03\x00\x1D\x20");
-                sha512.update(&server_public_key);
+                switch (curve_id) {
+                    .x25519 => sha512.update("\x03\x00\x1D"),
+                    .secp384r1 => sha512.update("\x03\x00\x18"),
+                }
+                sha512.update(&[1]u8{pub_key_len});
+                sha512.update(server_public_key_buf[0..pub_key_len]);
                 sha512.final(hash_buf[0..64]);
                 hash = hash_buf[0..64];
                 break :block .rsa_sha512;
@@ -1085,22 +1094,60 @@ pub fn client_connect(
     }
 
     // Generate keys for the session
-    var client_key_pair_seed: [32]u8 = undefined;
-    rand.bytes(&client_key_pair_seed);
-    const client_key_pair = std.crypto.dh.X25519.KeyPair.create(client_key_pair_seed) catch
-        return error.X25519KeyPairCreateFailed;
-    {
-        // Client key exchange
-        try writer.writeAll(&[5]u8{ 0x16, 0x03, 0x03, 0x00, 0x25 });
-        try hashing_writer.writeAll(&[5]u8{ 0x10, 0x00, 0x00, 0x21, 0x20 });
-        try hashing_writer.writeAll(&client_key_pair.public_key);
+    const client_key_pair: extern union {
+        x25519: std.crypto.dh.X25519.KeyPair,
+        secp384r1: crypto.ecc.KeyPair(crypto.ecc.SECP384R1),
+    } = switch (curve_id) {
+        .x25519 => while (true) {
+            var seed: [32]u8 = undefined;
+            rand.bytes(&seed);
+            const tmp = std.crypto.dh.X25519.KeyPair.create(seed) catch continue;
+            break .{ .x25519 = tmp };
+        } else unreachable,
+        .secp384r1 => blk: {
+            var seed: [48]u8 = undefined;
+            rand.bytes(&seed);
+            break :blk .{ .secp384r1 = crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed) };
+        },
+    };
+
+    // Client key exchange
+    switch (curve_id) {
+        .x25519 => {
+            try writer.writeAll(&[5]u8{ 0x16, 0x03, 0x03, 0x00, 0x25 });
+            try hashing_writer.writeAll(&[5]u8{ 0x10, 0x00, 0x00, 0x21, 0x20 });
+            try hashing_writer.writeAll(&client_key_pair.x25519.public_key);
+        },
+        .secp384r1 => {
+            try writer.writeAll(&[5]u8{ 0x16, 0x03, 0x03, 0x00, 0x66 });
+            try hashing_writer.writeAll(&[6]u8{ 0x10, 0x00, 0x00, 0x62, 0x61, 0x04 });
+            try hashing_writer.writeAll(&client_key_pair.secp384r1.public_key);
+        },
     }
     // Client encryption keys calculation for ECDHE_RSA cipher suites with SHA256 hash
     var master_secret: [48]u8 = undefined;
     var key_data: ciphers.KeyData(options.ciphersuites) = undefined;
     {
-        const pre_master_secret = std.crypto.dh.X25519.scalarmult(client_key_pair.secret_key, server_public_key) catch
-            return error.X25519MultFailed;
+        var pre_master_secret_buf: [96]u8 = undefined;
+        const pre_master_secret = switch (curve_id) {
+            .x25519 => blk: {
+                pre_master_secret_buf[0..32].* = std.crypto.dh.X25519.scalarmult(
+                    client_key_pair.x25519.secret_key,
+                    server_public_key_buf[0..32].*,
+                ) catch
+                    return error.PreMasterGenerationFailed;
+                break :blk pre_master_secret_buf[0..32];
+            },
+            .secp384r1 => blk: {
+                pre_master_secret_buf = crypto.ecc.scalarmult(
+                    crypto.ecc.SECP384R1,
+                    server_public_key_buf[1..].*,
+                    &client_key_pair.secp384r1.secret_key,
+                ) catch
+                    return error.PreMasterGenerationFailed;
+                break :blk pre_master_secret_buf[0..48];
+            },
+        };
 
         var seed: [77]u8 = undefined;
         seed[0..13].* = "master secret".*;
@@ -1108,17 +1155,17 @@ pub fn client_connect(
         seed[45..77].* = server_random;
 
         var a1: [32 + seed.len]u8 = undefined;
-        Hmac256.create(a1[0..32], &seed, &pre_master_secret);
+        Hmac256.create(a1[0..32], &seed, pre_master_secret);
         var a2: [32 + seed.len]u8 = undefined;
-        Hmac256.create(a2[0..32], a1[0..32], &pre_master_secret);
+        Hmac256.create(a2[0..32], a1[0..32], pre_master_secret);
 
         a1[32..].* = seed;
         a2[32..].* = seed;
 
         var p1: [32]u8 = undefined;
-        Hmac256.create(&p1, &a1, &pre_master_secret);
+        Hmac256.create(&p1, &a1, pre_master_secret);
         var p2: [32]u8 = undefined;
-        Hmac256.create(&p2, &a2, &pre_master_secret);
+        Hmac256.create(&p2, &a2, pre_master_secret);
 
         master_secret[0..32].* = p1;
         master_secret[32..48].* = p2[0..16].*;
@@ -1138,7 +1185,7 @@ pub fn client_connect(
         };
 
         const next_32_bytes = struct {
-            fn f(
+            inline fn f(
                 state: *KeyExpansionState,
                 comptime chunk_idx: comptime_int,
                 chunk: *[32]u8,
@@ -1260,7 +1307,7 @@ pub fn client_connect(
 pub fn Client(
     comptime _Reader: type,
     comptime _Writer: type,
-    comptime ciphersuites: anytype,
+    comptime _ciphersuites: anytype,
     comptime has_protocol: bool,
 ) type {
     return struct {
@@ -1271,8 +1318,8 @@ pub fn Client(
         ciphersuite: u16,
         client_seq: u64 = 1,
         server_seq: u64 = 1,
-        key_data: ciphers.KeyData(ciphersuites),
-        state: ciphers.ClientState(ciphersuites),
+        key_data: ciphers.KeyData(_ciphersuites),
+        state: ciphers.ClientState(_ciphersuites),
         rand: *std.rand.Random,
 
         parent_reader: _Reader,
@@ -1289,7 +1336,7 @@ pub fn Client(
         }
 
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
-            inline for (ciphersuites) |cs| {
+            inline for (_ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
                     // @TODO Make this buffer size configurable
                     return try cs.read(
@@ -1308,7 +1355,7 @@ pub fn Client(
         pub fn write(self: *@This(), buffer: []const u8) _Writer.Error!usize {
             if (buffer.len == 0) return 0;
 
-            inline for (ciphersuites) |cs| {
+            inline for (_ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
                     // @TODO Make this buffer size configurable
                     const curr_bytes = @truncate(u16, std.math.min(buffer.len, 1024));
@@ -1329,7 +1376,7 @@ pub fn Client(
         }
 
         pub fn close_notify(self: *@This()) !void {
-            inline for (ciphersuites) |cs| {
+            inline for (_ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
                     try cs.raw_write(
                         1024,
@@ -1357,18 +1404,26 @@ test "HTTPS request on wikipedia main page" {
     var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
     var client = try client_connect(.{
+        .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
-        .ciphersuites = all_ciphersuites,
-        // .protocols = &[_][]const u8{"http/1.1"},
+        .ciphersuites = ciphersuites.all,
+        .protocols = &[_][]const u8{"http/1.1"},
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
 
-    // std.testing.expectEqualStrings("http/1.1", client.protocol);
+    std.testing.expectEqualStrings("http/1.1", client.protocol);
     try client.writer().writeAll("GET /wiki/Main_Page HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 
     {
@@ -1399,38 +1454,46 @@ test "HTTPS request on wikipedia main page" {
     try client.reader().readNoEof(html_contents);
 }
 
-// test "HTTPS request on twitch oath2 endpoint" {
-//     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "id.twitch.tv", 443);
-//     defer sock.close();
+test "HTTPS request on twitch oath2 endpoint" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "id.twitch.tv", 443);
+    defer sock.close();
 
-//     var client = try client_connect(.{
-//         .temp_allocator = std.testing.allocator,
-//         .reader = sock.reader(),
-//         .writer = sock.writer(),
-//         .cert_verifier = .none,
-//         .ciphersuites = all_ciphersuites,
-//         .protocols = &[_][]const u8{"http/1.1"},
-//     }, "id.twitch.tv");
-//     defer client.close_notify() catch {};
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
 
-//     try client.writer().writeAll("GET /oauth2/validate HTTP/1.1\r\nHost: id.twitch.tv\r\nAccept: */*\r\n\r\n");
-//     var content_length: ?usize = null;
-//     hdr_loop: while (true) {
-//         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-//         defer std.testing.allocator.free(header);
+    var client = try client_connect(.{
+        .rand = rand,
+        .temp_allocator = std.testing.allocator,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .none,
+        .ciphersuites = ciphersuites.all,
+        .protocols = &[_][]const u8{"http/1.1"},
+    }, "id.twitch.tv");
+    defer client.close_notify() catch {};
 
-//         const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
-//         if (hdr_contents.len == 0) {
-//             break :hdr_loop;
-//         }
+    try client.writer().writeAll("GET /oauth2/validate HTTP/1.1\r\nHost: id.twitch.tv\r\nAccept: */*\r\n\r\n");
+    var content_length: ?usize = null;
+    hdr_loop: while (true) {
+        const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
+        defer std.testing.allocator.free(header);
 
-//         if (mem.startsWith(u8, hdr_contents, "Content-Length: ")) {
-//             content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
-//         }
-//     }
-//     std.testing.expect(content_length != null);
-//     const html_contents = try std.testing.allocator.alloc(u8, content_length.?);
-//     defer std.testing.allocator.free(html_contents);
+        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        if (hdr_contents.len == 0) {
+            break :hdr_loop;
+        }
 
-//     try client.reader().readNoEof(html_contents);
-// }
+        if (mem.startsWith(u8, hdr_contents, "Content-Length: ")) {
+            content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
+        }
+    }
+    std.testing.expect(content_length != null);
+    const html_contents = try std.testing.allocator.alloc(u8, content_length.?);
+    defer std.testing.allocator.free(html_contents);
+
+    try client.reader().readNoEof(html_contents);
+}

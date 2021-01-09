@@ -189,3 +189,741 @@ pub fn ctr(
             counterInt.* +%= 1;
     }
 }
+
+// Ported from BearSSL's ec_prime_i31 engine
+pub const ecc = struct {
+    pub const SECP384R1 = struct {
+        pub const point_len = 96;
+
+        const order = [point_len / 2]u8{
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xC7, 0x63, 0x4D, 0x81, 0xF4, 0x37, 0x2D, 0xDF,
+            0x58, 0x1A, 0x0D, 0xB2, 0x48, 0xB0, 0xA7, 0x7A,
+            0xEC, 0xEC, 0x19, 0x6A, 0xCC, 0xC5, 0x29, 0x73,
+        };
+
+        const P = [_]u32{
+            0x0000018C, 0x7FFFFFFF, 0x00000001, 0x00000000,
+            0x7FFFFFF8, 0x7FFFFFEF, 0x7FFFFFFF, 0x7FFFFFFF,
+            0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF,
+            0x7FFFFFFF, 0x00000FFF,
+        };
+        const R2 = [_]u32{
+            0x0000018C, 0x00000000, 0x00000080, 0x7FFFFE00,
+            0x000001FF, 0x00000800, 0x00000000, 0x7FFFE000,
+            0x00001FFF, 0x00008000, 0x00008000, 0x00000000,
+            0x00000000, 0x00000000,
+        };
+        const B = [_]u32{
+            0x0000018C, 0x6E666840, 0x070D0392, 0x5D810231,
+            0x7651D50C, 0x17E218D6, 0x1B192002, 0x44EFE441,
+            0x3A524E2B, 0x2719BA5F, 0x41F02209, 0x36C5643E,
+            0x5813EFFE, 0x000008A5,
+        };
+
+        const base_point = [point_len]u8{
+            0xAA, 0x87, 0xCA, 0x22, 0xBE, 0x8B, 0x05, 0x37,
+            0x8E, 0xB1, 0xC7, 0x1E, 0xF3, 0x20, 0xAD, 0x74,
+            0x6E, 0x1D, 0x3B, 0x62, 0x8B, 0xA7, 0x9B, 0x98,
+            0x59, 0xF7, 0x41, 0xE0, 0x82, 0x54, 0x2A, 0x38,
+            0x55, 0x02, 0xF2, 0x5D, 0xBF, 0x55, 0x29, 0x6C,
+            0x3A, 0x54, 0x5E, 0x38, 0x72, 0x76, 0x0A, 0xB7,
+            0x36, 0x17, 0xDE, 0x4A, 0x96, 0x26, 0x2C, 0x6F,
+            0x5D, 0x9E, 0x98, 0xBF, 0x92, 0x92, 0xDC, 0x29,
+            0xF8, 0xF4, 0x1D, 0xBD, 0x28, 0x9A, 0x14, 0x7C,
+            0xE9, 0xDA, 0x31, 0x13, 0xB5, 0xF0, 0xB8, 0xC0,
+            0x0A, 0x60, 0xB1, 0xCE, 0x1D, 0x7E, 0x81, 0x9D,
+            0x7A, 0x43, 0x1D, 0x7C, 0x90, 0xEA, 0x0E, 0x5F,
+        };
+
+        comptime {
+            std.debug.assert((P[0] - (P[0] >> 5) + 7) >> 2 == point_len + 1);
+        }
+    };
+
+    fn jacobian_len(comptime Curve: type) usize {
+        return @divTrunc(Curve.order.len * 8 + 61, 31);
+    }
+
+    fn Jacobian(comptime Curve: type) type {
+        return [3][jacobian_len(Curve)]u32;
+    }
+
+    fn zero_jacobian(comptime Curve: type) Jacobian(Curve) {
+        var result = std.mem.zeroes(Jacobian(Curve));
+        result[0][0] = Curve.P[0];
+        result[1][0] = Curve.P[0];
+        result[2][0] = Curve.P[0];
+        return result;
+    }
+
+    pub fn scalarmult(
+        comptime Curve: type,
+        point: [Curve.point_len]u8,
+        k: []const u8,
+    ) ![Curve.point_len]u8 {
+        var P: Jacobian(Curve) = undefined;
+        var res: u32 = decode_to_jacobian(Curve, &P, point);
+        point_mul(Curve, &P, k);
+        var out: [Curve.point_len]u8 = undefined;
+        encode_from_jacobian(Curve, &out, P);
+        if (res == 0)
+            return error.MultiplicationFailed;
+        return out;
+    }
+
+    pub fn KeyPair(comptime Curve: type) type {
+        return struct {
+            public_key: [Curve.point_len]u8,
+            secret_key: [Curve.point_len / 2]u8,
+        };
+    }
+
+    pub fn make_key_pair(comptime Curve: type, rand_bytes: [Curve.point_len / 2]u8) KeyPair(Curve) {
+        var key_bytes = rand_bytes;
+        comptime var mask: u8 = 0xFF;
+        comptime {
+            while (mask >= Curve.order[0]) {
+                mask >>= 1;
+            }
+        }
+        key_bytes[0] &= mask;
+        key_bytes[Curve.point_len / 2 - 1] |= 0x01;
+
+        return .{
+            .secret_key = key_bytes,
+            .public_key = scalarmult(Curve, Curve.base_point, &key_bytes) catch unreachable,
+        };
+    }
+
+    fn jacobian_with_one_set(comptime Curve: type, comptime fields: [2][jacobian_len(Curve)]u32) Jacobian(Curve) {
+        comptime const plen = (Curve.P[0] + 63) >> 5;
+        return fields ++ [1][jacobian_len(Curve)]u32{
+            [2]u32{ Curve.P[0], 1 } ++ ([1]u32{0} ** (plen - 2)),
+        };
+    }
+
+    fn encode_from_jacobian(comptime Curve: type, point: *[Curve.point_len]u8, P: Jacobian(Curve)) void {
+        var Q = P;
+        const T = comptime jacobian_with_one_set(Curve, [2][jacobian_len(Curve)]u32{ undefined, undefined });
+        _ = run_code(Curve, &Q, T, &code.affine);
+        encode_jacobian_part(Curve, point[0 .. Curve.point_len / 2], Q[0]);
+        encode_jacobian_part(Curve, point[Curve.point_len / 2 ..], Q[1]);
+    }
+
+    fn point_mul(comptime Curve: type, P: *Jacobian(Curve), x: []const u8) void {
+        var P2 = P.*;
+        point_double(Curve, &P2);
+        var P3 = P.*;
+        point_add(Curve, &P3, P2);
+        var Q = zero_jacobian(Curve);
+        var qz: u32 = 1;
+        var xlen = x.len;
+        var xidx: usize = 0;
+        while (xlen > 0) : ({
+            xlen -= 1;
+            xidx += 1;
+        }) {
+            var k: u3 = 6;
+            while (true) : (k -= 2) {
+                point_double(Curve, &Q);
+                point_double(Curve, &Q);
+                var T = P.*;
+                var U = Q;
+                const bits = @as(u32, x[xidx] >> k) & 3;
+                const bnz = NEQ(bits, 0);
+                CCOPY(EQ(bits, 2), mem.asBytes(&T), mem.asBytes(&P2));
+                CCOPY(EQ(bits, 3), mem.asBytes(&T), mem.asBytes(&P3));
+                point_add(Curve, &U, T);
+                CCOPY(bnz & qz, mem.asBytes(&Q), mem.asBytes(&T));
+                CCOPY(bnz & ~qz, mem.asBytes(&Q), mem.asBytes(&U));
+                qz &= ~bnz;
+
+                if (k == 0)
+                    break;
+            }
+        }
+        P.* = Q;
+    }
+
+    inline fn point_double(comptime Curve: type, P: *Jacobian(Curve)) void {
+        _ = run_code(Curve, P, P.*, &code.double);
+    }
+    inline fn point_add(comptime Curve: type, P1: *Jacobian(Curve), P2: Jacobian(Curve)) void {
+        _ = run_code(Curve, P1, P2, &code._add);
+    }
+
+    fn decode_to_jacobian(
+        comptime Curve: type,
+        out: *Jacobian(Curve),
+        point: [Curve.point_len]u8,
+    ) u32 {
+        out.* = zero_jacobian(Curve);
+        var result = decode_mod(Curve, &out.*[0], point[0 .. Curve.point_len / 2].*);
+        result &= decode_mod(Curve, &out.*[1], point[Curve.point_len / 2 ..].*);
+
+        const zlen = comptime ((Curve.P[0] + 63) >> 5);
+        comptime std.debug.assert(zlen == @typeInfo(@TypeOf(Curve.R2)).Array.len);
+        comptime std.debug.assert(zlen == @typeInfo(@TypeOf(Curve.B)).Array.len);
+
+        const Q = comptime jacobian_with_one_set(Curve, [2][jacobian_len(Curve)]u32{ Curve.R2, Curve.B });
+        result &= ~run_code(Curve, out, Q, &code.check);
+        return result;
+    }
+
+    const code = struct {
+        const P1x = 0;
+        const P1y = 1;
+        const P1z = 2;
+        const P2x = 3;
+        const P2y = 4;
+        const P2z = 5;
+        const Px = 0;
+        const Py = 1;
+        const Pz = 2;
+        const t1 = 6;
+        const t2 = 7;
+        const t3 = 8;
+        const t4 = 9;
+        const t5 = 10;
+        const t6 = 11;
+        const t7 = 12;
+        const t8 = 3;
+        const t9 = 4;
+        const t10 = 5;
+        fn MSET(comptime d: u16, comptime a: u16) u16 {
+            return 0x0000 + (d << 8) + (a << 4);
+        }
+        fn MADD(comptime d: u16, comptime a: u16) u16 {
+            return 0x1000 + (d << 8) + (a << 4);
+        }
+        fn MSUB(comptime d: u16, comptime a: u16) u16 {
+            return 0x2000 + (d << 8) + (a << 4);
+        }
+        fn MMUL(comptime d: u16, comptime a: u16, comptime b: u16) u16 {
+            return 0x3000 + (d << 8) + (a << 4) + b;
+        }
+        fn MINV(comptime d: u16, comptime a: u16, comptime b: u16) u16 {
+            return 0x4000 + (d << 8) + (a << 4) + b;
+        }
+        fn MTZ(comptime d: u16) u16 {
+            return 0x5000 + (d << 8);
+        }
+        const ENDCODE = 0;
+
+        const check = [_]u16{
+            // Convert x and y to Montgomery representation.
+            MMUL(t1, P1x, P2x),
+            MMUL(t2, P1y, P2x),
+            MSET(P1x, t1),
+            MSET(P1y, t2),
+            // Compute x^3 in t1.
+            MMUL(t2, P1x, P1x),
+            MMUL(t1, P1x, t2),
+            // Subtract 3*x from t1.
+            MSUB(t1, P1x),
+            MSUB(t1, P1x),
+            MSUB(t1, P1x),
+            // Add b.
+            MADD(t1, P2y),
+            // Compute y^2 in t2.
+            MMUL(t2, P1y, P1y),
+            // Compare y^2 with x^3 - 3*x + b; they must match.
+            MSUB(t1, t2),
+            MTZ(t1),
+            // Set z to 1 (in Montgomery representation).
+            MMUL(P1z, P2x, P2z),
+            ENDCODE,
+        };
+        const double = [_]u16{
+            // Compute z^2 (in t1).
+            MMUL(t1, Pz, Pz),
+            // Compute x-z^2 (in t2) and then x+z^2 (in t1).
+            MSET(t2, Px),
+            MSUB(t2, t1),
+            MADD(t1, Px),
+            // Compute m = 3*(x+z^2)*(x-z^2) (in t1).
+            MMUL(t3, t1, t2),
+            MSET(t1, t3),
+            MADD(t1, t3),
+            MADD(t1, t3),
+            // Compute s = 4*x*y^2 (in t2) and 2*y^2 (in t3).
+            MMUL(t3, Py, Py),
+            MADD(t3, t3),
+            MMUL(t2, Px, t3),
+            MADD(t2, t2),
+            // Compute x' = m^2 - 2*s.
+            MMUL(Px, t1, t1),
+            MSUB(Px, t2),
+            MSUB(Px, t2),
+            // Compute z' = 2*y*z.
+            MMUL(t4, Py, Pz),
+            MSET(Pz, t4),
+            MADD(Pz, t4),
+            // Compute y' = m*(s - x') - 8*y^4. Note that we already have
+            // 2*y^2 in t3.
+            MSUB(t2, Px),
+            MMUL(Py, t1, t2),
+            MMUL(t4, t3, t3),
+            MSUB(Py, t4),
+            MSUB(Py, t4),
+            ENDCODE,
+        };
+        const _add = [_]u16{
+            // Compute u1 = x1*z2^2 (in t1) and s1 = y1*z2^3 (in t3).
+            MMUL(t3, P2z, P2z),
+            MMUL(t1, P1x, t3),
+            MMUL(t4, P2z, t3),
+            MMUL(t3, P1y, t4),
+            // Compute u2 = x2*z1^2 (in t2) and s2 = y2*z1^3 (in t4).
+            MMUL(t4, P1z, P1z),
+            MMUL(t2, P2x, t4),
+            MMUL(t5, P1z, t4),
+            MMUL(t4, P2y, t5),
+            //Compute h = u2 - u1 (in t2) and r = s2 - s1 (in t4).
+            MSUB(t2, t1),
+            MSUB(t4, t3),
+            // Report cases where r = 0 through the returned flag.
+            MTZ(t4),
+            // Compute u1*h^2 (in t6) and h^3 (in t5).
+            MMUL(t7, t2, t2),
+            MMUL(t6, t1, t7),
+            MMUL(t5, t7, t2),
+            // Compute x3 = r^2 - h^3 - 2*u1*h^2.
+            // t1 and t7 can be used as scratch registers.
+            MMUL(P1x, t4, t4),
+            MSUB(P1x, t5),
+            MSUB(P1x, t6),
+            MSUB(P1x, t6),
+            //Compute y3 = r*(u1*h^2 - x3) - s1*h^3.
+            MSUB(t6, P1x),
+            MMUL(P1y, t4, t6),
+            MMUL(t1, t5, t3),
+            MSUB(P1y, t1),
+            //Compute z3 = h*z1*z2.
+            MMUL(t1, P1z, P2z),
+            MMUL(P1z, t1, t2),
+            ENDCODE,
+        };
+        const affine = [_]u16{
+            // Save z*R in t1.
+            MSET(t1, P1z),
+            // Compute z^3 in t2.
+            MMUL(t2, P1z, P1z),
+            MMUL(t3, P1z, t2),
+            MMUL(t2, t3, P2z),
+            // Invert to (1/z^3) in t2.
+            MINV(t2, t3, t4),
+            // Compute y.
+            MSET(t3, P1y),
+            MMUL(P1y, t2, t3),
+            // Compute (1/z^2) in t3.
+            MMUL(t3, t2, t1),
+            // Compute x.
+            MSET(t2, P1x),
+            MMUL(P1x, t2, t3),
+            ENDCODE,
+        };
+    };
+
+    fn decode_mod(
+        comptime Curve: type,
+        x: *[jacobian_len(Curve)]u32,
+        src: [Curve.point_len / 2]u8,
+    ) u32 {
+        const mlen = comptime ((Curve.P[0] + 31) >> 5);
+        const tlen = comptime std.math.max(mlen << 2, Curve.point_len / 2) + 4;
+
+        var r: u32 = 0;
+        var pass: usize = 0;
+        while (pass < 2) : (pass += 1) {
+            var v: usize = 1;
+            var acc: u32 = 0;
+            var acc_len: u32 = 0;
+
+            var u: usize = 0;
+            while (u < tlen) : (u += 1) {
+                const b = if (u < Curve.point_len / 2)
+                    @as(u32, src[Curve.point_len / 2 - 1 - u])
+                else
+                    0;
+                acc |= b << @truncate(u5, acc_len);
+                acc_len += 8;
+                if (acc_len >= 31) {
+                    const xw = acc & 0x7FFFFFFF;
+                    acc_len -= 31;
+                    acc = b >> @truncate(u5, 8 - acc_len);
+                    if (v <= mlen) {
+                        if (pass != 0) {
+                            x[v] = r & xw;
+                        } else {
+                            const cc = @bitCast(u32, CMP(xw, Curve.P[v]));
+                            r = MUX(EQ(cc, 0), r, cc);
+                        }
+                    } else if (pass == 0) {
+                        r = MUX(EQ(xw, 0), r, 1);
+                    }
+                    v += 1;
+                }
+            }
+            r >>= 1;
+            r |= (r << 1);
+        }
+        x[0] = Curve.P[0];
+        return r & 1;
+    }
+
+    fn run_code(
+        comptime Curve: type,
+        P1: *Jacobian(Curve),
+        P2: Jacobian(Curve),
+        comptime Code: []const u16,
+    ) u32 {
+        comptime const jaclen = jacobian_len(Curve);
+
+        var t: [13][jaclen]u32 = undefined;
+        var result: u32 = 1;
+
+        t[0..3].* = P1.*;
+        t[3..6].* = P2;
+
+        comptime var u: usize = 0;
+        inline while (true) : (u += 1) {
+            comptime var op = Code[u];
+            if (op == 0)
+                break;
+            comptime const d = (op >> 8) & 0x0F;
+            comptime const a = (op >> 4) & 0x0F;
+            comptime const b = op & 0x0F;
+            op >>= 12;
+
+            switch (op) {
+                0 => t[d] = t[a],
+                1 => {
+                    var ctl = add(jaclen, &t[d], t[a], 1);
+                    ctl |= NOT(sub(jaclen, &t[d], Curve.P, 0));
+                    _ = sub(jaclen, &t[d], Curve.P, ctl);
+                },
+                2 => _ = add(jaclen, &t[d], Curve.P, sub(jaclen, &t[d], t[a], 1)),
+                3 => montymul(Curve, &t[d], t[a], t[b], Curve.P, 1),
+                4 => {
+                    var tp: [Curve.point_len / 2]u8 = undefined;
+                    encode_jacobian_part(Curve, &tp, Curve.P);
+                    tp[Curve.point_len / 2 - 1] -= 2;
+                    modpow(Curve, &t[d], tp, 1, &t[a], &t[b]);
+                },
+                else => result &= ~iszero(jaclen, t[d]),
+            }
+        }
+        P1.* = t[0..3].*;
+        return result;
+    }
+
+    inline fn MUL31(x: u32, y: u32) u64 {
+        return @as(u64, x) * @as(u64, y);
+    }
+
+    inline fn MUL31_lo(x: u32, y: u32) u32 {
+        return (x *% y) & 0x7FFFFFFF;
+    }
+
+    inline fn MUX(ctl: u32, x: u32, y: u32) u32 {
+        return y ^ (@bitCast(u32, -@bitCast(i32, ctl)) & (x ^ y));
+    }
+    inline fn NOT(ctl: u32) u32 {
+        return ctl ^ 1;
+    }
+    inline fn NEQ(x: u32, y: u32) u32 {
+        const q = x ^ y;
+        return (q | @bitCast(u32, -@bitCast(i32, q))) >> 31;
+    }
+    inline fn EQ(x: u32, y: u32) u32 {
+        const q = x ^ y;
+        return NOT((q | @bitCast(u32, -@bitCast(i32, q))) >> 31);
+    }
+    inline fn CMP(x: u32, y: u32) i32 {
+        return @bitCast(i32, GT(x, y)) | -@bitCast(i32, GT(y, x));
+    }
+    inline fn GT(x: u32, y: u32) u32 {
+        const z = y -% x;
+        return (z ^ ((x ^ y) & (x ^ z))) >> 31;
+    }
+    inline fn LT(x: u32, y: u32) u32 {
+        return GT(y, x);
+    }
+    inline fn GE(x: u32, y: u32) u32 {
+        return NOT(GT(y, x));
+    }
+
+    fn CCOPY(ctl: u32, dst: []u8, src: []const u8) void {
+        for (src) |s, i| {
+            dst[i] = @truncate(u8, MUX(ctl, s, dst[i]));
+        }
+    }
+
+    // @TODO Remove lots of len and Curve parameters, just use the first byte calcualtions
+    // This will make all these functions shared for and reduce code bloat
+
+    inline fn set_zero(comptime len: usize, out: *[len]u32, bit_len: u32) void {
+        out[0] = bit_len;
+        mem.set(u32, out[1..][0 .. (bit_len + 31) >> 5], 0);
+    }
+
+    fn divrem(_hi: u32, _lo: u32, d: u32, r: *u32) u32 {
+        var hi = _hi;
+        var lo = _lo;
+        var q: u32 = 0;
+        const ch = EQ(hi, d);
+        hi = MUX(ch, 0, hi);
+
+        var k: u5 = 31;
+        while (k > 0) : (k -= 1) {
+            const j = @truncate(u5, 32 - @as(u6, k));
+            const w = (hi << j) | (lo >> k);
+            const ctl = GE(w, d) | (hi >> k);
+            const hi2 = (w -% d) >> j;
+            const lo2 = lo -% (d << k);
+            hi = MUX(ctl, hi2, hi);
+            lo = MUX(ctl, lo2, lo);
+            q |= ctl << k;
+        }
+        const cf = GE(lo, d) | hi;
+        q |= cf;
+        r.* = MUX(cf, lo -% d, lo);
+        return q;
+    }
+
+    inline fn div(hi: u32, lo: u32, d: u32) u32 {
+        var r: u32 = undefined;
+        return divrem(hi, lo, d, &r);
+    }
+
+    fn muladd_small(comptime len: usize, x: *[len]u32, z: u32, m: [len]u32) void {
+        var a0: u32 = undefined;
+        var a1: u32 = undefined;
+        var b0: u32 = undefined;
+        const mblr = @intCast(u5, m[0] & 31);
+        const mlen = (m[0] + 31) >> 5;
+        const hi = x[mlen];
+        if (mblr == 0) {
+            a0 = x[mlen];
+            mem.copyBackwards(u32, x[2..][0 .. mlen - 1], x[1..][0 .. mlen - 1]);
+            x[1] = z;
+            a1 = x[mlen];
+            b0 = m[mlen];
+        } else {
+            a0 = ((x[mlen] << (31 - mblr)) | (x[mlen - 1] >> mblr)) & 0x7FFFFFFF;
+            mem.copyBackwards(u32, x[2..][0 .. mlen - 1], x[1..][0 .. mlen - 1]);
+            x[1] = z;
+            a1 = ((x[mlen] << (31 - mblr)) | (x[mlen - 1] >> mblr)) & 0x7FFFFFFF;
+            b0 = ((m[mlen] << (31 - mblr)) | (m[mlen - 1] >> mblr)) & 0x7FFFFFFF;
+        }
+
+        const g = div(a0 >> 1, a1 | (a0 << 31), b0);
+        const q = MUX(EQ(a0, b0), 0x7FFFFFFF, MUX(EQ(g, 0), 0, g -% 1));
+
+        var cc: u32 = 0;
+        var tb: u32 = 1;
+        var u: usize = 1;
+        while (u <= mlen) : (u += 1) {
+            const mw = m[u];
+            const zl = MUL31(mw, q) + cc;
+            cc = @truncate(u32, zl >> 31);
+            const zw = @truncate(u32, zl) & 0x7FFFFFFF;
+            const xw = x[u];
+            var nxw = xw -% zw;
+            cc += nxw >> 31;
+            nxw &= 0x7FFFFFFF;
+            x[u] = nxw;
+            tb = MUX(EQ(nxw, mw), tb, GT(nxw, mw));
+        }
+
+        const over = GT(cc, hi);
+        const under = ~over & (tb | LT(cc, hi));
+        _ = add(len, x, m, over);
+        _ = sub(len, x, m, under);
+    }
+
+    fn to_monty(comptime len: usize, x: *[len]u32, m: [len]u32) void {
+        const mlen = (m[0] + 31) >> 5;
+        var k = mlen;
+        while (k > 0) : (k -= 1) {
+            muladd_small(len, x, 0, m);
+        }
+    }
+
+    fn modpow(
+        comptime Curve: type,
+        x: *[jacobian_len(Curve)]u32,
+        e: [Curve.point_len / 2]u8,
+        m0i: u32,
+        t1: *[jacobian_len(Curve)]u32,
+        t2: *[jacobian_len(Curve)]u32,
+    ) void {
+        comptime const jaclen = jacobian_len(Curve);
+        t1.* = x.*;
+        to_monty(jaclen, t1, Curve.P);
+        set_zero(jaclen, x, Curve.P[0]);
+        x[1] = 1;
+        comptime const bitlen = (Curve.point_len / 2) << 3;
+        var k: usize = 0;
+        while (k < bitlen) : (k += 1) {
+            const ctl = (e[Curve.point_len / 2 - 1 - (k >> 3)] >> (@truncate(u3, k & 7))) & 1;
+            montymul(Curve, t2, x.*, t1.*, Curve.P, m0i);
+            CCOPY(ctl, mem.asBytes(x), mem.asBytes(t2));
+            montymul(Curve, t2, t1.*, t1.*, Curve.P, m0i);
+            t1.* = t2.*;
+        }
+    }
+
+    fn encode_jacobian_part(comptime Curve: type, dst: *[Curve.point_len / 2]u8, x: [jacobian_len(Curve)]u32) void {
+        const xlen = (x[0] + 31) >> 5;
+
+        var buf = @ptrToInt(dst) + Curve.point_len / 2;
+        var len: usize = Curve.point_len / 2;
+        var k: usize = 1;
+        var acc: u32 = 0;
+        var acc_len: u5 = 0;
+        while (len != 0) {
+            const w = if (k <= xlen) x[k] else 0;
+            k += 1;
+            if (acc_len == 0) {
+                acc = w;
+                acc_len = 31;
+            } else {
+                const z = acc | (w << acc_len);
+                acc_len -= 1;
+                acc = w >> (31 - acc_len);
+                if (len >= 4) {
+                    buf -= 4;
+                    len -= 4;
+                    mem.writeIntBig(u32, @intToPtr([*]u8, buf)[0..4], z);
+                } else {
+                    switch (len) {
+                        3 => {
+                            @intToPtr(*u8, buf - 3).* = @truncate(u8, z >> 16);
+                            @intToPtr(*u8, buf - 2).* = @truncate(u8, z >> 8);
+                        },
+                        2 => @intToPtr(*u8, buf - 2).* = @truncate(u8, z >> 8),
+                        1 => {},
+                        else => unreachable,
+                    }
+                    @intToPtr(*u8, buf - 1).* = @truncate(u8, z);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn montymul(
+        comptime Curve: type,
+        out: *[jacobian_len(Curve)]u32,
+        x: [jacobian_len(Curve)]u32,
+        y: [jacobian_len(Curve)]u32,
+        m: [jacobian_len(Curve)]u32,
+        m0i: u32,
+    ) void {
+        comptime const jaclen = jacobian_len(Curve);
+        const len = (m[0] + 31) >> 5;
+        const len4 = len & ~@as(usize, 3);
+        set_zero(jaclen, out, m[0]);
+        var dh: u32 = 0;
+        var u: usize = 0;
+        while (u < len) : (u += 1) {
+            const xu = x[u + 1];
+            const f = MUL31_lo(out[1] + MUL31_lo(x[u + 1], y[1]), m0i);
+
+            var r: u64 = 0;
+            var v: usize = 0;
+            while (v < len4) : (v += 4) {
+                comptime var j = 1;
+                inline while (j <= 4) : (j += 1) {
+                    const z = out[v + j] +% MUL31(xu, y[v + j]) +% MUL31(f, m[v + j]) +% r;
+                    r = z >> 31;
+                    out[v + j - 1] = @truncate(u32, z) & 0x7FFFFFFF;
+                }
+            }
+            while (v < len) : (v += 1) {
+                const z = out[v + 1] +% MUL31(xu, y[v + 1]) +% MUL31(f, m[v + 1]) +% r;
+                r = z >> 31;
+                out[v] = @truncate(u32, z) & 0x7FFFFFFF;
+            }
+            dh += @truncate(u32, r);
+            out[len] = dh & 0x7FFFFFFF;
+            dh >>= 31;
+        }
+        out[0] = m[0];
+        const ctl = NEQ(dh, 0) | NOT(sub(jaclen, out, m, 0));
+        _ = sub(jaclen, out, m, ctl);
+    }
+
+    fn add(comptime len: usize, a: *[len]u32, b: [len]u32, ctl: u32) u32 {
+        var u: usize = 1;
+        var cc: u32 = 0;
+        while (u < len) : (u += 1) {
+            const aw = a[u];
+            const bw = b[u];
+            const naw = aw +% bw +% cc;
+            cc = naw >> 31;
+            a[u] = MUX(ctl, naw & 0x7FFFFFFF, aw);
+        }
+        return cc;
+    }
+
+    fn sub(comptime len: usize, a: *[len]u32, b: [len]u32, ctl: u32) u32 {
+        var cc: u32 = 0;
+        const m = (a[0] + 63) >> 5;
+        var u: usize = 1;
+        while (u < m) : (u += 1) {
+            const aw = a[u];
+            const bw = b[u];
+            const naw = aw -% bw -% cc;
+            cc = naw >> 31;
+            a[u] = MUX(ctl, naw & 0x7FFFFFFF, aw);
+        }
+        return cc;
+    }
+
+    fn iszero(comptime len: usize, arr: [len]u32) u32 {
+        var z: u32 = 0;
+        var u: usize = len - 1;
+        while (u > 0) : (u -= 1) {
+            z |= arr[u];
+        }
+        return ~(z | @bitCast(u32, -@bitCast(i32, z))) >> 31;
+    }
+};
+
+test "elliptic curve functions with secp384r1 curve" {
+    {
+        // Decode to Jacobian then encode again with no operations
+        var P: ecc.Jacobian(ecc.SECP384R1) = undefined;
+        var res: u32 = ecc.decode_to_jacobian(ecc.SECP384R1, &P, ecc.SECP384R1.base_point);
+        var out: [96]u8 = undefined;
+        ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
+        std.testing.expectEqual(ecc.SECP384R1.base_point, out);
+
+        // Multiply by one, check that the result is still the base point
+        mem.set(u8, &out, 0);
+        ecc.point_mul(ecc.SECP384R1, &P, &[1]u8{1});
+        ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
+        std.testing.expectEqual(ecc.SECP384R1.base_point, out);
+    }
+
+    {
+        // Derive a shared secret from a Diffie-Hellman key exchange
+        var seed: [48]u8 = undefined;
+        std.crypto.random.bytes(&seed);
+        const kp1 = ecc.make_key_pair(ecc.SECP384R1, seed);
+        std.crypto.random.bytes(&seed);
+        const kp2 = ecc.make_key_pair(ecc.SECP384R1, seed);
+
+        const shared1 = try ecc.scalarmult(ecc.SECP384R1, kp1.public_key, &kp2.secret_key);
+        const shared2 = try ecc.scalarmult(ecc.SECP384R1, kp2.public_key, &kp1.secret_key);
+        std.testing.expectEqual(shared1, shared2);
+    }
+
+    // @TODO Add tests with known points.
+}
