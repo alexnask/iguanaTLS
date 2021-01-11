@@ -913,11 +913,18 @@ test "elliptic curve functions with secp384r1 curve" {
     }
 
     {
+        // @TODO Remove this once std.crypto.rand works in .evented mode
+        var rand = blk: {
+            var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+            try std.os.getrandom(&seed);
+            break :blk &std.rand.DefaultCsprng.init(seed).random;
+        };
+
         // Derive a shared secret from a Diffie-Hellman key exchange
         var seed: [48]u8 = undefined;
-        std.crypto.random.bytes(&seed);
+        rand.bytes(&seed);
         const kp1 = ecc.make_key_pair(ecc.SECP384R1, seed);
-        std.crypto.random.bytes(&seed);
+        rand.bytes(&seed);
         const kp2 = ecc.make_key_pair(ecc.SECP384R1, seed);
 
         const shared1 = try ecc.scalarmult(ecc.SECP384R1, kp1.public_key, &kp2.secret_key);
