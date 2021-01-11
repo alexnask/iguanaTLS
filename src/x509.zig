@@ -56,26 +56,23 @@ pub const PublicKey = union(enum) {
 };
 
 pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
-    // @TODO Use reader.isBytes instead of parsing and a bunch of checks here.
-    // Or read and a couple of mem.eqls (read tag, check its seq, read min amnt of bytes, check, read rest, check else error)
-    const seq = try asn1.der.parse_value(allocator, reader);
-    defer seq.deinit(allocator);
-
-    if (seq != .sequence or seq.sequence.len != 2 or seq.sequence[0] != .object_identifier)
+    if ((try reader.readByte()) != 0x30)
         return error.MalformedDER;
+    const seq_len = try asn1.der.parse_length(reader);
 
-    const oid_len = seq.sequence[0].object_identifier.len;
-    if (oid_len != 6 and oid_len != 7)
+    if ((try reader.readByte()) != 0x06)
         return error.MalformedDER;
-
-    const data = seq.sequence[0].object_identifier.data;
-    if (oid_len == 7 and data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 113549 and
-        data[4] == 1 and data[5] == 1 and data[6] == 1)
-    {
-        if (seq.sequence[1] != .@"null")
+    const oid_bytes = try asn1.der.parse_length(reader);
+    if (oid_bytes == 9 ) {
+        // @TODO This fails in async if merged with the if
+        if (!try reader.isBytes(&[9]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0xD, 0x1, 0x1, 0x1 }))
             return error.MalformedDER;
-
+        // OID is 1.2.840.113549.1.1.1
         // RSA key
+        // Skip past the NULL
+        const null_byte = try reader.readByte();
+        if ((null_byte) != 0x05 or (try asn1.der.parse_length(reader)) != 0x00)
+            return error.MalformedDER;
         {
             // BitString next!
             if ((try reader.readByte()) != 0x03)
@@ -89,61 +86,68 @@ pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
                 return error.MalformedDER;
             _ = try asn1.der.parse_length(reader);
 
-            // @TODO Parse into []const u8s instead
             // Modulus
-            const modulus = try asn1.der.parse_value(allocator, reader);
-            errdefer modulus.deinit(allocator);
-            if (modulus != .int or !modulus.int.positive) return error.MalformedDER;
+            if ((try reader.readByte()) != 0x02)
+                return error.MalformedDER;
+            const modulus = try asn1.der.parse_int(allocator, reader);
+            errdefer allocator.free(modulus.limbs);
+            if (!modulus.positive) return error.MalformedDER;
             // Exponent
-            const exponent = try asn1.der.parse_value(allocator, reader);
-            errdefer exponent.deinit(allocator);
-            if (exponent != .int or !exponent.int.positive) return error.MalformedDER;
+            if ((try reader.readByte()) != 0x02)
+                return error.MalformedDER;
+            const exponent = try asn1.der.parse_int(allocator, reader);
+            errdefer allocator.free(exponent.limbs);
+            if (!exponent.positive) return error.MalformedDER;
             return PublicKey{
                 .rsa = .{
-                    .modulus = modulus.int.limbs,
-                    .exponent = exponent.int.limbs,
+                    .modulus = modulus.limbs,
+                    .exponent = exponent.limbs,
                 },
             };
         }
-    }
-
-    if (oid_len == 6 and data[0] == 1 and data[1] == 2 and data[2] == 840 and data[3] == 10045 and
-        data[4] == 2 and data[5] == 1)
-    {
-        // We only support named curves, for which the parameter
-        // field is an OID.
-        if (seq.sequence[1] != .object_identifier)
+    } else if (oid_bytes == 7) {
+        // @TODO This fails in async if merged with the if
+        if (!try reader.isBytes(&[7]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 }))
             return error.MalformedDER;
-
-        const curve_oid = seq.sequence[1].object_identifier;
-        const curve_data = curve_oid.data[0..curve_oid.len];
-        // EC key
-        if (curve_data.len != 7 and curve_data.len != 5)
+        // OID is 1.2.840.10045.2.1
+        // Elliptical curve
+        // We only support named curves, for which the parameter field is an OID.
+        const oid_tag = try reader.readByte();
+        if (oid_tag != 0x06)
             return error.MalformedDER;
+        const curve_oid_bytes = try asn1.der.parse_length(reader);
 
         var key: PublicKey = undefined;
-        if (curve_data.len == 5 and curve_data[0] == 1 and curve_data[1] == 3 and curve_data[2] == 132 and
-            curve_data[3] == 0)
-        {
-            if (curve_data[4] == 34)
+        if (curve_oid_bytes == 5 and try reader.isBytes(&[4]u8{ 0x2B, 0x81, 0x04, 0x00 })) {
+            // 1.3.132.0.{34, 35}
+            const last_byte = try reader.readByte();
+            if (last_byte == 0x22)
                 key.ec = .{ .id = .secp384r1, .curve_point = undefined }
-            else if (curve_data[4] == 35)
+            else if (last_byte == 0x23)
                 key.ec = .{ .id = .secp521r1, .curve_point = undefined }
             else
                 return error.MalformedDER;
-        } else if (curve_data.len == 7 and curve_data[0] == 1 and curve_data[1] == 2 and curve_data[2] == 840 and
-            curve_data[3] == 10045 and curve_data[4] == 3 and curve_data[5] == 1 and curve_data[6] == 7)
+        } else if (curve_oid_bytes == 8)
         {
+            if (!try reader.isBytes(&[8]u8{ 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x3, 0x1, 0x7 }))
+                return error.MalformedDER;
             key.ec = .{ .id = .secp256r1, .curve_point = undefined };
         } else {
             return error.MalformedDER;
         }
 
-        const ec_bit_string = try asn1.der.parse_value(allocator, reader);
-        errdefer ec_bit_string.deinit(allocator);
-        if (ec_bit_string != .bit_string or ec_bit_string.bit_string.bit_len % 8 != 0)
+        if ((try reader.readByte()) != 0x03)
             return error.MalformedDER;
-        key.ec.curve_point = ec_bit_string.bit_string.data;
+        const byte_len = try asn1.der.parse_length(reader);
+        const unused_bits = try reader.readByte();
+        const bit_count = (byte_len - 1) * 8 - unused_bits;
+        if (bit_count % 8 != 0)
+            return error.MalformedDER;
+        const bit_memory = try allocator.alloc(u8, std.math.divCeil(usize, bit_count, 8) catch unreachable);
+        errdefer allocator.free(bit_memory);
+        try reader.readNoEof(bit_memory[0.. byte_len - 1]);
+
+        key.ec.curve_point = bit_memory;
         return key;
     }
     return error.MalformedDER;

@@ -965,14 +965,7 @@ pub fn client_connect(
             return error.ServerMalformedResponse;
     }
     // Read server certificates
-    // @TODO remove this once DER parsing works in async
-    if (@hasField(Options, "skip_public_key_verification") and options.cert_verifier != .none) {
-        @compileError("'skip_public_key_verification' must be used in conjunction with the '.none' cert_verifier");
-    }
-    const skip_public_key_verification = comptime (options.cert_verifier == .none and
-        @hasField(Options, "skip_public_key_verification") and
-        options.skip_public_key_verification);
-    var certificate_public_key: (if (skip_public_key_verification) void else x509.PublicKey) = undefined;
+    var certificate_public_key: x509.PublicKey = undefined;
     {
         const length = try handshake_record_length(reader);
         {
@@ -984,15 +977,11 @@ pub fn client_connect(
         const certs_length = try hashing_reader.readIntBig(u24);
         const cert_verifier: CertificateVerifier = options.cert_verifier;
         switch (cert_verifier) {
-            .none => if (skip_public_key_verification) {
-                try hashing_reader.skipBytes(certs_length, .{});
-            } else {
-                certificate_public_key = try extract_cert_public_key(
-                    options.temp_allocator,
-                    hashing_reader,
-                    certs_length,
-                );
-            },
+            .none => certificate_public_key = try extract_cert_public_key(
+                options.temp_allocator,
+                hashing_reader,
+                certs_length,
+            ),
             .function => |f| {
                 var reader_state = CertificateReaderState(@TypeOf(hashing_reader)){
                     .reader = hashing_reader,
@@ -1011,7 +1000,7 @@ pub fn client_connect(
             ),
         }
     }
-    errdefer if (!skip_public_key_verification) certificate_public_key.deinit(options.temp_allocator);
+    errdefer certificate_public_key.deinit(options.temp_allocator);
     // Read server ephemeral public key
     var server_public_key_buf: [97]u8 = undefined;
     var curve_id: enum { x25519, secp384r1 } = undefined;
@@ -1080,25 +1069,21 @@ pub fn client_connect(
             },
             else => return error.ServerInvalidSignatureAlgorithm,
         };
-        if (!skip_public_key_verification) {
-            const signature_bytes = try options.temp_allocator.alloc(u8, signature_len);
-            defer options.temp_allocator.free(signature_bytes);
-            try hashing_reader.readNoEof(signature_bytes);
+        const signature_bytes = try options.temp_allocator.alloc(u8, signature_len);
+        defer options.temp_allocator.free(signature_bytes);
+        try hashing_reader.readNoEof(signature_bytes);
 
-            if (!try verify_signature(
-                options.temp_allocator,
-                signature_algoritm,
-                .{ .data = signature_bytes, .bit_len = signature_len * 8 },
-                hash,
-                certificate_public_key,
-            ))
-                return error.ServerInvalidSignature;
+        if (!try verify_signature(
+            options.temp_allocator,
+            signature_algoritm,
+            .{ .data = signature_bytes, .bit_len = signature_len * 8 },
+            hash,
+            certificate_public_key,
+        ))
+            return error.ServerInvalidSignature;
 
-            certificate_public_key.deinit(options.temp_allocator);
-            certificate_public_key = x509.PublicKey{ .ec = .{ .id = undefined, .curve_point = &[0]u8{} } };
-        } else {
-            try hashing_reader.skipBytes(signature_len, .{});
-        }
+        certificate_public_key.deinit(options.temp_allocator);
+        certificate_public_key = x509.PublicKey{ .ec = .{ .id = undefined, .curve_point = &[0]u8{} } };
     }
     // Read server hello done
     {

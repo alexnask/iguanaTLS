@@ -407,6 +407,47 @@ pub const der = struct {
         return enc;
     }
 
+    fn parse_int_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
+        const length = try parse_length_internal(bytes_read, der_reader);
+        const first_byte = try der_reader.readByte();
+        if (first_byte == 0x0 and length > 1) {
+            // Positive number with highest bit set to 1 in the rest.
+            const limb_count = std.math.divCeil(usize, length - 1, @sizeOf(usize)) catch unreachable;
+            const limbs = try alloc.alloc(usize, limb_count);
+            std.mem.set(usize, limbs, 0);
+            errdefer alloc.free(limbs);
+
+            var limb_ptr = @ptrCast([*]u8, limbs.ptr);
+            try der_reader.readNoEof(limb_ptr[0 .. length - 1]);
+            // We always reverse because the standard library big int expects little endian.
+            mem.reverse(u8, limb_ptr[0 .. length - 1]);
+
+            bytes_read.* += length;
+            return BigInt{ .limbs = limbs, .positive = true };
+        }
+        std.debug.assert(length != 0);
+        // Write first_byte
+        // Twos complement
+        const limb_count = std.math.divCeil(usize, length, @sizeOf(usize)) catch unreachable;
+        const limbs = try alloc.alloc(usize, limb_count);
+        std.mem.set(usize, limbs, 0);
+        errdefer alloc.free(limbs);
+
+        var limb_ptr = @ptrCast([*]u8, limbs.ptr);
+        limb_ptr[0] = first_byte & ~@as(u8, 0x80);
+        try der_reader.readNoEof(limb_ptr[1..length]);
+
+        // We always reverse because the standard library big int expects little endian.
+        mem.reverse(u8, limb_ptr[0..length]);
+        bytes_read.* += length;
+        return BigInt{ .limbs = limbs, .positive = (first_byte & 0x80) == 0x00 };
+    }
+
+    pub fn parse_int(alloc: *Allocator, der_reader: anytype) !BigInt {
+        var bytes: usize = undefined;
+        return try parse_int_internal(alloc, &bytes, der_reader);
+    }
+
     pub fn parse_length(der_reader: anytype) !usize {
         var bytes: usize = 0;
         return try parse_length_internal(&bytes, der_reader);
@@ -463,41 +504,7 @@ pub const der = struct {
                 defer bytes_read.* += 2;
                 return Value{ .bool = (try der_reader.readByte()) != 0x0 };
             },
-            .int => {
-                const length = try parse_length_internal(bytes_read, der_reader);
-                const first_byte = try der_reader.readByte();
-                if (first_byte == 0x0 and length > 1) {
-                    // Positive number with highest bit set to 1 in the rest.
-                    const limb_count = std.math.divCeil(usize, length - 1, @sizeOf(usize)) catch unreachable;
-                    const limbs = try alloc.alloc(usize, limb_count);
-                    std.mem.set(usize, limbs, 0);
-                    errdefer alloc.free(limbs);
-
-                    var limb_ptr = @ptrCast([*]u8, limbs.ptr);
-                    try der_reader.readNoEof(limb_ptr[0 .. length - 1]);
-                    // We always reverse because the standard library big int expects little endian.
-                    mem.reverse(u8, limb_ptr[0 .. length - 1]);
-
-                    bytes_read.* += length;
-                    return Value{ .int = .{ .limbs = limbs, .positive = true } };
-                }
-                std.debug.assert(length != 0);
-                // Write first_byte
-                // Twos complement
-                const limb_count = std.math.divCeil(usize, length, @sizeOf(usize)) catch unreachable;
-                const limbs = try alloc.alloc(usize, limb_count);
-                std.mem.set(usize, limbs, 0);
-                errdefer alloc.free(limbs);
-
-                var limb_ptr = @ptrCast([*]u8, limbs.ptr);
-                limb_ptr[0] = first_byte & ~@as(u8, 0x80);
-                try der_reader.readNoEof(limb_ptr[1..length]);
-
-                // We always reverse because the standard library big int expects little endian.
-                mem.reverse(u8, limb_ptr[0..length]);
-                bytes_read.* += length;
-                return Value{ .int = .{ .limbs = limbs, .positive = (first_byte & 0x80) == 0x00 } };
-            },
+            .int => return Value{ .int = try parse_int_internal(alloc, bytes_read, der_reader) },
             .bit_string => {
                 const length = try parse_length_internal(bytes_read, der_reader);
                 const unused_bits = try der_reader.readByte();
