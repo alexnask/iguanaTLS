@@ -71,7 +71,10 @@ pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
         // RSA key
         // Skip past the NULL
         const null_byte = try reader.readByte();
-        if ((null_byte) != 0x05 or (try asn1.der.parse_length(reader)) != 0x00)
+        if (null_byte != 0x05)
+            return error.MalformedDER;
+        const null_len = try asn1.der.parse_length(reader);
+        if (null_len != 0x00)
             return error.MalformedDER;
         {
             // BitString next!
@@ -118,7 +121,9 @@ pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
         const curve_oid_bytes = try asn1.der.parse_length(reader);
 
         var key: PublicKey = undefined;
-        if (curve_oid_bytes == 5 and try reader.isBytes(&[4]u8{ 0x2B, 0x81, 0x04, 0x00 })) {
+        if (curve_oid_bytes == 5) {
+            if (!try reader.isBytes(&[4]u8{ 0x2B, 0x81, 0x04, 0x00 }))
+                return error.MalformedDER;
             // 1.3.132.0.{34, 35}
             const last_byte = try reader.readByte();
             if (last_byte == 0x22)
