@@ -284,8 +284,39 @@ fn check_cert_timestamp(time: i64, tag_byte: u8, length: usize, reader: anytype)
         return error.CertificateVerificationFailed;
 }
 
-fn add_cert_subject_dn(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
+fn add_dn_field(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    const seq_tag = try reader.readByte();
+    if (seq_tag != 0x30)
+        return error.CertificateVerificationFailed;
+    const seq_length = try asn1.der.parse_length(reader);
+
+    const oid_tag = try reader.readByte();
+    if (oid_tag != 0x06)
+        return error.CertificateVerificationFailed;
+
+    const oid_length = try asn1.der.parse_length(reader);
+    if (oid_length == 3 and (try reader.isBytes("\x55\x04\x03"))) {
+        // Common name
+        const common_name_tag = try reader.readByte();
+        if (common_name_tag != 0x04 and common_name_tag != 0x0c and common_name_tag != 0x13 and common_name_tag != 0x16)
+            return error.CertificateVerificationFailed;
+        const common_name_len = try asn1.der.parse_length(reader);
+        state.list.items[state.list.items.len - 1].common_name = state.fbs.buffer[state.fbs.pos .. state.fbs.pos + common_name_len];
+    }
+}
+
+fn add_cert_subject_dn(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     state.list.items[state.list.items.len - 1].dn = state.fbs.buffer[state.fbs.pos .. state.fbs.pos + length];
+    const schema = .{
+        .sequence_of,
+        .{
+            .capture, 0, .set
+        },
+    };
+    const captures = .{
+        state, add_dn_field,
+    };
+    try asn1.der.parse_schema_tag_len(tag, length, schema, captures, reader);
 }
 
 fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
@@ -313,6 +344,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         .is_ca = is_ca,
         .bytes = cert_bytes,
         .dn = undefined,
+        .common_name = undefined,
         .public_key = x509.PublicKey.empty,
         .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
@@ -553,6 +585,7 @@ const SignatureAlgorithm = enum {
 const ServerCertificate = struct {
     bytes: []const u8,
     dn: []const u8,
+    common_name: []const u8,
     public_key: x509.PublicKey,
     signature: asn1.BitString,
     signature_algorithm: SignatureAlgorithm,
@@ -567,7 +600,7 @@ const VerifierCaptureState = struct {
 };
 
 pub fn default_cert_verifier(
-    allocator: *std.mem.Allocator,
+    allocator: *mem.Allocator,
     reader: anytype,
     certs_bytes: usize,
     trusted_certificates: []const x509.TrustAnchor,
@@ -621,7 +654,27 @@ pub fn default_cert_verifier(
     if (bytes_read != certs_bytes)
         return error.CertificateVerificationFailed;
 
+
     const chain = capture_state.list.items;
+    if (chain.len == 0) return error.CertificateVerificationFailed;
+    // Check if the hostname matches the leaf certificate's common name
+    {
+        var common_name_split = mem.split(chain[0].common_name, ".");
+        var hostname_split = mem.split(hostname, ".");
+        while (true) {
+            const cn_part = common_name_split.next();
+            const hn_part = hostname_split.next();
+            if ((cn_part == null) != (hn_part == null))
+                return error.CertificateVerificationFailed;
+            if (cn_part == null)
+                break;
+            if (mem.eql(u8, cn_part.?, "*"))
+                continue;
+            if (!mem.eql(u8, cn_part.?, hn_part.?))
+                return error.CertificateVerificationFailed;
+        }
+    }
+
     var i: usize = 0;
     while (i < chain.len - 1) : (i += 1) {
         if (!try certificate_verify_signature(
@@ -1662,6 +1715,10 @@ test "Connecting to expired.badssl.com returns an error" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "expired.badssl.com", 443);
     defer sock.close();
 
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
+    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
     // @TODO Remove this once std.crypto.rand works in .evented mode
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
@@ -1675,6 +1732,31 @@ test "Connecting to expired.badssl.com returns an error" {
         .writer = sock.writer(),
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
-        .trusted_certificates = &[0]x509.TrustAnchor{},
+        .trusted_certificates = trusted_chain.data.items,
     }, "expired.badssl.com"));
+}
+
+test "Connecting to wrong.host.badssl.com returns an error" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "wrong.host.badssl.com", 443);
+    defer sock.close();
+
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
+    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = trusted_chain.data.items,
+    }, "wrong.host.badssl.com"));
 }
