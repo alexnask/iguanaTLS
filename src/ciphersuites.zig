@@ -394,7 +394,7 @@ fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
     return @typeInfo(field_info.field_type).Array.len;
 }
 
-pub fn key_data_size(comptime ciphersuites: []const type) usize {
+pub fn key_data_size(comptime ciphersuites: anytype) usize {
     var max: usize = 0;
     for (ciphersuites) |cs| {
         const curr = (key_field_width(cs.Keys, .client_mac) orelse 0) +
@@ -409,7 +409,7 @@ pub fn key_data_size(comptime ciphersuites: []const type) usize {
     return max;
 }
 
-pub fn KeyData(comptime ciphersuites: []const type) type {
+pub fn KeyData(comptime ciphersuites: anytype) type {
     return struct {
         data: [key_data_size(ciphersuites)]u8,
 
@@ -455,7 +455,7 @@ pub fn KeyData(comptime ciphersuites: []const type) type {
 }
 
 pub fn key_expansion(
-    comptime ciphersuites: []const type,
+    comptime ciphersuites: anytype,
     tag: u16,
     context: anytype,
     comptime next_32_bytes: anytype,
@@ -505,7 +505,7 @@ pub fn key_expansion(
     unreachable;
 }
 
-pub fn ClientState(comptime ciphersuites: []const type) type {
+pub fn ClientState(comptime ciphersuites: anytype) type {
     var fields: [ciphersuites.len]std.builtin.TypeInfo.UnionField = undefined;
     for (ciphersuites) |cs, i| {
         fields[i] = .{
@@ -524,7 +524,7 @@ pub fn ClientState(comptime ciphersuites: []const type) type {
     });
 }
 
-pub fn client_state_default(comptime ciphersuites: []const type, tag: u16) ClientState(ciphersuites) {
+pub fn client_state_default(comptime ciphersuites: anytype, tag: u16) ClientState(ciphersuites) {
     inline for (ciphersuites) |cs| {
         if (cs.tag == tag) {
             return @unionInit(ClientState(ciphersuites), cs.name, cs.default_state);
