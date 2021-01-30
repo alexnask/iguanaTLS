@@ -302,8 +302,9 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
     const is_ca = state.list.items.len != 0;
 
     const encoded_length = asn1.der.encode_length(length).slice();
+    // This is not errdefered since default_cert_verifier call takes care of cleaning up all the certificate data.
+    // Same for the signature.data
     const cert_bytes = try state.allocator.alloc(u8, length + 1 + encoded_length.len);
-    errdefer state.allocator.free(cert_bytes);
     cert_bytes[0] = tag_byte;
     mem.copy(u8, cert_bytes[1 .. 1 + encoded_length.len], encoded_length);
 
@@ -312,11 +313,10 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         .is_ca = is_ca,
         .bytes = cert_bytes,
         .dn = undefined,
-        .public_key = undefined,
+        .public_key = x509.PublicKey.empty,
         .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
     };
-    errdefer state.allocator.free(state.list.items[state.list.items.len - 1].signature.data);
 
     const schema = .{
         .sequence,
@@ -642,12 +642,7 @@ pub fn default_cert_verifier(
                 cert.public_key.eql(trusted.public_key))
             {
                 const key = chain[0].public_key;
-                chain[0].public_key = x509.PublicKey{
-                    .ec = .{
-                        .id = undefined,
-                        .curve_point = &[0]u8{},
-                    },
-                };
+                chain[0].public_key = x509.PublicKey.empty;
                 return key;
             }
 
@@ -662,12 +657,7 @@ pub fn default_cert_verifier(
                 trusted.public_key,
             )) {
                 const key = chain[0].public_key;
-                chain[0].public_key = x509.PublicKey{
-                    .ec = .{
-                        .id = undefined,
-                        .curve_point = &[0]u8{},
-                    },
-                };
+                chain[0].public_key = x509.PublicKey.empty;
                 return key;
             }
         }
@@ -790,7 +780,33 @@ pub const curves = struct {
         }
     };
 
-    pub const all = &[_]type{ x25519, secp384r1 };
+    pub const secp256r1 = struct {
+        const name = "secp256r1";
+        const tag = 0x0017;
+        const pub_key_len = 65;
+        const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
+
+        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+            var seed: [32]u8 = undefined;
+            rand.bytes(&seed);
+            return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
+        }
+
+        inline fn make_pre_master_secret(
+            key_pair: Keys,
+            pre_master_secret_buf: []u8,
+            server_public_key: *const [65]u8,
+        ) ![]const u8 {
+            pre_master_secret_buf[0..64].* = crypto.ecc.scalarmult(
+                crypto.ecc.SECP256R1,
+                server_public_key[1..].*,
+                &key_pair.secret_key,
+            ) catch return error.PreMasterGenerationFailed;
+            return pre_master_secret_buf[0..32];
+        }
+    };
+
+    pub const all = &[_]type{ x25519, secp384r1, secp256r1 };
 
     fn max_pub_key_len(comptime list: anytype) usize {
         var max: usize = 0;
@@ -1195,7 +1211,10 @@ pub fn client_connect(
         }
 
         try hashing_reader.readNoEof(server_public_key_buf[0..pub_key_len]);
-        // @@@TODO Check for the uncompressed format (first byte == 0x04) when not using x25519
+        if (curve_id != curves.x25519.tag) {
+            if (server_public_key_buf[0] != 0x04)
+                return error.ServerMalformedResponse;
+        }
 
         // Signed public key
         const signature_id = try hashing_reader.readIntBig(u16);
@@ -1245,7 +1264,7 @@ pub fn client_connect(
             return error.ServerInvalidSignature;
 
         certificate_public_key.deinit(options.temp_allocator);
-        certificate_public_key = x509.PublicKey{ .ec = .{ .id = undefined, .curve_point = &[0]u8{} } };
+        certificate_public_key = x509.PublicKey.empty;
     }
     // Read server hello done
     {
@@ -1637,4 +1656,25 @@ test "HTTPS request on twitch oath2 endpoint" {
     defer std.testing.allocator.free(html_contents);
 
     try client.reader().readNoEof(html_contents);
+}
+
+test "Connecting to expired.badssl.com returns an error" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "expired.badssl.com", 443);
+    defer sock.close();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = &[0]x509.TrustAnchor{},
+    }, "expired.badssl.com"));
 }
