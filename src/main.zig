@@ -344,7 +344,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         .is_ca = is_ca,
         .bytes = cert_bytes,
         .dn = undefined,
-        .common_name = undefined,
+        .common_name = &[0]u8{},
         .public_key = x509.PublicKey.empty,
         .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
@@ -1760,3 +1760,29 @@ test "Connecting to wrong.host.badssl.com returns an error" {
         .trusted_certificates = trusted_chain.data.items,
     }, "wrong.host.badssl.com"));
 }
+
+test "Connecting to self-signed.badssl.com returns an error" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "self-signed.badssl.com", 443);
+    defer sock.close();
+
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
+    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = trusted_chain.data.items,
+    }, "self-signed.badssl.com"));
+}
+
