@@ -89,6 +89,21 @@ fn record_handshake(
     const out_file = try std.fs.cwd().createFile(out_name, .{});
     defer out_file.close();
 
+    if (ciphersuites.len > 1) {
+        try out_file.writeAll(&[_]u8{ 0x3, 'a', 'l', 'l' });
+    } else {
+        try out_file.writer().writeIntLittle(u8, ciphersuites[0].name.len);
+        try out_file.writeAll(ciphersuites[0].name);
+    }
+    if (curves.len > 1) {
+        try out_file.writeAll(&[_]u8{ 0x3, 'a', 'l', 'l' });
+    } else {
+        try out_file.writer().writeIntLittle(u8, curves[0].name.len);
+        try out_file.writeAll(curves[0].name);
+    }
+    try out_file.writer().writeIntLittle(usize, hostname.len);
+    try out_file.writeAll(hostname);
+    try out_file.writer().writeIntLittle(u16, port);
     try out_file.writer().writeIntLittle(usize, pem_file_path.len);
     try out_file.writeAll(pem_file_path);
     try out_file.writer().writeIntLittle(usize, recording_reader_state.recorded.items.len);
@@ -193,7 +208,7 @@ pub fn main() !void {
         return error.InvalidArg;
     }
 
-    const out_name = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}-{}.session", .{
+    const out_name = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}-{}.handshake", .{
         hostname,
         ciphersuite_str,
         curve_str,
