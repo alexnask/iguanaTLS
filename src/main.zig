@@ -781,7 +781,7 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
 
 pub const curves = struct {
     pub const x25519 = struct {
-        const name = "x25519";
+        pub const name = "x25519";
         const tag = 0x001D;
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
@@ -808,7 +808,7 @@ pub const curves = struct {
     };
 
     pub const secp384r1 = struct {
-        const name = "secp384r1";
+        pub const name = "secp384r1";
         const tag = 0x0018;
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
@@ -834,7 +834,7 @@ pub const curves = struct {
     };
 
     pub const secp256r1 = struct {
-        const name = "secp256r1";
+        pub const name = "secp256r1";
         const tag = 0x0017;
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
