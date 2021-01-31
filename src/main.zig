@@ -310,7 +310,7 @@ fn add_cert_subject_dn(state: *VerifierCaptureState, tag: u8, length: usize, rea
     const schema = .{
         .sequence_of,
         .{
-            .capture, 0, .set
+            .capture, 0, .set,
         },
     };
     const captures = .{
@@ -599,6 +599,34 @@ const VerifierCaptureState = struct {
     fbs: *std.io.FixedBufferStream([]const u8),
 };
 
+// @TODO Move out of here
+const ReverseSplitIterator = struct {
+    buffer: []const u8,
+    index: ?usize,
+    delimiter: []const u8,
+
+    pub fn next(self: *ReverseSplitIterator) ?[]const u8 {
+        const end = self.index orelse return null;
+        const start = if (mem.lastIndexOfLinear(u8, self.buffer[0..end], self.delimiter)) |delim_start| blk: {
+            self.index = delim_start;
+            break :blk delim_start + self.delimiter.len;
+        } else blk: {
+            self.index = null;
+            break :blk 0;
+        };
+        return self.buffer[start..end];
+    }
+};
+
+fn reverse_split(buffer: []const u8, delimiter: []const u8) ReverseSplitIterator {
+    std.debug.assert(delimiter.len != 0);
+    return .{
+        .index = buffer.len,
+        .buffer = buffer,
+        .delimiter = delimiter,
+    };
+}
+
 pub fn default_cert_verifier(
     allocator: *mem.Allocator,
     reader: anytype,
@@ -654,24 +682,29 @@ pub fn default_cert_verifier(
     if (bytes_read != certs_bytes)
         return error.CertificateVerificationFailed;
 
-
     const chain = capture_state.list.items;
     if (chain.len == 0) return error.CertificateVerificationFailed;
     // Check if the hostname matches the leaf certificate's common name
     {
-        var common_name_split = mem.split(chain[0].common_name, ".");
-        var hostname_split = mem.split(hostname, ".");
+        var common_name_split = reverse_split(chain[0].common_name, ".");
+        var hostname_split = reverse_split(hostname, ".");
         while (true) {
             const cn_part = common_name_split.next();
             const hn_part = hostname_split.next();
-            if ((cn_part == null) != (hn_part == null))
-                return error.CertificateVerificationFailed;
-            if (cn_part == null)
+
+            if (cn_part) |cnp| {
+                if (hn_part == null and common_name_split.index == null and mem.eql(u8, cnp, "www"))
+                    break
+                else if (hn_part) |hnp| {
+                    if (mem.eql(u8, cnp, "*"))
+                        continue;
+                    if (!mem.eql(u8, cnp, hnp))
+                        return error.CertificateVerificationFailed;
+                }
+            } else if (hn_part != null)
+                return error.CertificateVerificationFailed
+            else
                 break;
-            if (mem.eql(u8, cn_part.?, "*"))
-                continue;
-            if (!mem.eql(u8, cn_part.?, hn_part.?))
-                return error.CertificateVerificationFailed;
         }
     }
 
@@ -1785,4 +1818,3 @@ test "Connecting to self-signed.badssl.com returns an error" {
         .trusted_certificates = trusted_chain.data.items,
     }, "self-signed.badssl.com"));
 }
-

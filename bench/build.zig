@@ -6,9 +6,15 @@ pub fn build(b: *Builder) void {
     record_build.setBuildMode(.Debug);
     record_build.install();
 
+    const use_gpa = b.option(
+        bool,
+        "use-gpa",
+        "Use the general purpose allocator instead of an arena allocator",
+    ) orelse false;
     const bench_build = b.addExecutable("bench", "bench.zig");
     bench_build.addPackagePath("tls", "../src/main.zig");
     bench_build.setBuildMode(.ReleaseFast);
+    bench_build.addBuildOption(bool, "use_gpa", use_gpa);
     bench_build.install();
 
     const record_run_cmd = record_build.run();
