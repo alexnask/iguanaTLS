@@ -4,6 +4,73 @@ const use_gpa = @import("build_options").use_gpa;
 
 pub const log_level = .debug;
 
+const RecordingAllocator = struct {
+    const Stats = struct {
+        peak_allocated: usize = 0,
+        total_allocated: usize = 0,
+        total_deallocated: usize = 0,
+        total_allocations: usize = 0,
+    };
+
+    allocator: std.mem.Allocator = .{
+        .allocFn = allocFn,
+        .resizeFn = resizeFn,
+    },
+    base_allocator: *std.mem.Allocator,
+    stats: Stats = .{},
+
+    fn allocFn(
+        a: *std.mem.Allocator,
+        len: usize,
+        ptr_align: u29,
+        len_align: u29,
+        ret_addr: usize,
+    ) ![]u8 {
+        const self = @fieldParentPtr(RecordingAllocator, "allocator", a);
+        const mem = try self.base_allocator.allocFn(
+            self.base_allocator,
+            len,
+            ptr_align,
+            len_align,
+            ret_addr,
+        );
+
+        self.stats.total_allocations += 1;
+        self.stats.total_allocated += mem.len;
+        self.stats.peak_allocated = std.math.max(
+            self.stats.peak_allocated,
+            self.stats.total_allocated - self.stats.total_deallocated,
+        );
+        return mem;
+    }
+
+    fn resizeFn(a: *std.mem.Allocator, buf: []u8, buf_align: u29, new_len: usize, len_align: u29, ret_addr: usize) !usize {
+        const self = @fieldParentPtr(RecordingAllocator, "allocator", a);
+        const actual_len = try self.base_allocator.resizeFn(
+            self.base_allocator,
+            buf,
+            buf_align,
+            new_len,
+            len_align,
+            ret_addr,
+        );
+
+        if (actual_len == 0) {
+            std.debug.assert(new_len == 0);
+            self.stats.total_deallocated += buf.len;
+        } else if (actual_len > buf.len) {
+            self.stats.total_allocated += actual_len - buf.len;
+            self.stats.peak_allocated = std.math.max(
+                self.stats.peak_allocated,
+                self.stats.total_allocated - self.stats.total_deallocated,
+            );
+        } else {
+            self.stats.total_deallocated += buf.len - actual_len;
+        }
+        return actual_len;
+    }
+};
+
 const SinkWriter = blk: {
     const S = struct {};
     break :blk std.io.Writer(S, error{}, struct {
@@ -84,8 +151,14 @@ fn benchmark_run(
     }
     {
         std.debug.print("Benchmarking for {d:.2} seconds...\n", .{running_time});
-        var runtimes = std.ArrayList(i128).init(gpa);
-        defer runtimes.deinit();
+
+        const RunRecording = struct {
+            time: i128,
+            mem_stats: RecordingAllocator.Stats,
+        };
+        var run_recordings = std.ArrayList(RunRecording).init(gpa);
+
+        defer run_recordings.deinit();
         const bench_time_ns = @floatToInt(i128, running_time * std.time.ns_per_s);
 
         var total_time_passed: i128 = 0;
@@ -100,6 +173,7 @@ fn benchmark_run(
             };
             const reader = ReplayingReader{ .context = &reader_state };
             const writer = SinkWriter{ .context = .{} };
+            var recording_allocator = RecordingAllocator{ .base_allocator = allocator };
 
             timer.reset();
             _ = try tls.client_connect(.{
@@ -109,12 +183,16 @@ fn benchmark_run(
                 .ciphersuites = ciphersuites,
                 .curves = curves,
                 .cert_verifier = .default,
-                .temp_allocator = allocator,
+                .temp_allocator = &recording_allocator.allocator,
                 .trusted_certificates = trust_anchors.data.items,
             }, hostname);
             const runtime = timer.read();
             total_time_passed += runtime;
-            try runtimes.append(runtime);
+
+            (try run_recordings.addOne()).* = .{
+                .mem_stats = recording_allocator.stats,
+                .time = runtime,
+            };
         }
 
         const total_time_secs = @intToFloat(f64, total_time_passed) / std.time.ns_per_s;
@@ -123,8 +201,8 @@ fn benchmark_run(
 
         const std_dev_ns = blk: {
             var acc: i128 = 0;
-            for (runtimes.items) |rt| {
-                const dt = rt - mean_time_ns;
+            for (run_recordings.items) |rec| {
+                const dt = rec.time - mean_time_ns;
                 acc += dt * dt;
             }
             break :blk std.math.sqrt(@divTrunc(acc, iterations));
@@ -147,7 +225,11 @@ fn benchmark_run(
         });
 
         // (percentile/100) * (total number n + 1)
-        std.sort.sort(i128, runtimes.items, {}, comptime std.sort.asc(i128));
+        std.sort.sort(RunRecording, run_recordings.items, {}, struct {
+            fn f(_: void, lhs: RunRecording, rhs: RunRecording) bool {
+                return lhs.time < rhs.time;
+            }
+        }.f);
         const percentiles = .{ 99.0, 90.0, 75.0, 50.0 };
         inline for (percentiles) |percentile| {
             if (percentile < iterations) {
@@ -156,11 +238,27 @@ fn benchmark_run(
                     "{d:.0}th percentile value: {d:.2} ms\n",
                     .{
                         percentile,
-                        @intToFloat(f64, runtimes.items[idx]) * std.time.ms_per_s / std.time.ns_per_s,
+                        @intToFloat(f64, run_recordings.items[idx].time) * std.time.ms_per_s / std.time.ns_per_s,
                     },
                 );
             }
         }
+
+        const first_mem_stats = run_recordings.items[0].mem_stats;
+        for (run_recordings.items[1..]) |rec| {
+            std.debug.assert(std.meta.eql(first_mem_stats, rec.mem_stats));
+        }
+
+        std.debug.print(
+            \\Peak allocated memory: {Bi:.2},
+            \\Total allocated memory: {Bi:.2},
+            \\Number of allocations: {d},
+            \\
+        , .{
+            first_mem_stats.peak_allocated,
+            first_mem_stats.total_allocated,
+            first_mem_stats.total_allocations,
+        });
     }
 }
 
@@ -209,7 +307,6 @@ fn benchmark_run_with_ciphersuite(
     return error.InvalidCurve;
 }
 
-// @TODO Also track memory allocations in the handshake
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = &gpa.allocator;

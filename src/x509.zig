@@ -47,7 +47,7 @@ pub const PublicKey = union(enum) {
     }
 
     pub fn eql(self: @This(), other: @This()) bool {
-        if (@as(@TagType(@This()), self) != @as(@TagType(@This()), other))
+        if (@as(std.meta.Tag(@This()), self) != @as(std.meta.Tag(@This()), other))
             return false;
         switch (self) {
             .rsa => |mod_exp| return mem.eql(usize, mod_exp.exponent, other.rsa.exponent) and
