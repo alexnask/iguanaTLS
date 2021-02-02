@@ -23,6 +23,26 @@ fn handshake_record_length(reader: anytype) !usize {
     return try record_length(0x16, reader);
 }
 
+pub const RecordTagLength = struct {
+    tag: u8,
+    length: u16,
+};
+pub fn record_tag_length(reader: anytype) !RecordTagLength {
+    const record_tag = try reader.readByte();
+
+    var record_header: [4]u8 = undefined;
+    try reader.readNoEof(&record_header);
+
+    if (!mem.eql(u8, record_header[0..2], "\x03\x03") and !mem.eql(u8, record_header[0..2], "\x03\x01"))
+        return error.ServerInvalidVersion;
+
+    const len = mem.readIntSliceBig(u16, record_header[2..4]);
+    return RecordTagLength{
+        .tag = record_tag,
+        .length = len,
+    };
+}
+
 pub fn record_length(t: u8, reader: anytype) !usize {
     try check_record_type(t, reader);
     var record_header: [4]u8 = undefined;
@@ -72,37 +92,41 @@ fn check_record_type(
 
         const severity = try reader.readByte();
         const err_num = try reader.readByte();
-        return switch (err_num) {
-            0 => error.AlertCloseNotify,
-            10 => error.AlertUnexpectedMessage,
-            20 => error.AlertBadRecordMAC,
-            21 => error.AlertDecryptionFailed,
-            22 => error.AlertRecordOverflow,
-            30 => error.AlertDecompressionFailure,
-            40 => error.AlertHandshakeFailure,
-            41 => error.AlertNoCertificate,
-            42 => error.AlertBadCertificate,
-            43 => error.AlertUnsupportedCertificate,
-            44 => error.AlertCertificateRevoked,
-            45 => error.AlertCertificateExpired,
-            46 => error.AlertCertificateUnknown,
-            47 => error.AlertIllegalParameter,
-            48 => error.AlertUnknownCA,
-            49 => error.AlertAccessDenied,
-            50 => error.AlertDecodeError,
-            51 => error.AlertDecryptError,
-            60 => error.AlertExportRestriction,
-            70 => error.AlertProtocolVersion,
-            71 => error.AlertInsufficientSecurity,
-            80 => error.AlertInternalError,
-            90 => error.AlertUserCanceled,
-            100 => error.AlertNoRenegotiation,
-            110 => error.AlertUnsupportedExtension,
-            else => error.ServerMalformedResponse,
-        };
+        return alert_byte_to_error(err_num);
     }
     if (record_type != expected)
         return error.ServerMalformedResponse;
+}
+
+pub fn alert_byte_to_error(b: u8) (ServerAlert || error{ServerMalformedResponse}) {
+    return switch (b) {
+        0 => error.AlertCloseNotify,
+        10 => error.AlertUnexpectedMessage,
+        20 => error.AlertBadRecordMAC,
+        21 => error.AlertDecryptionFailed,
+        22 => error.AlertRecordOverflow,
+        30 => error.AlertDecompressionFailure,
+        40 => error.AlertHandshakeFailure,
+        41 => error.AlertNoCertificate,
+        42 => error.AlertBadCertificate,
+        43 => error.AlertUnsupportedCertificate,
+        44 => error.AlertCertificateRevoked,
+        45 => error.AlertCertificateExpired,
+        46 => error.AlertCertificateUnknown,
+        47 => error.AlertIllegalParameter,
+        48 => error.AlertUnknownCA,
+        49 => error.AlertAccessDenied,
+        50 => error.AlertDecodeError,
+        51 => error.AlertDecryptError,
+        60 => error.AlertExportRestriction,
+        70 => error.AlertProtocolVersion,
+        71 => error.AlertInsufficientSecurity,
+        80 => error.AlertInternalError,
+        90 => error.AlertUserCanceled,
+        100 => error.AlertNoRenegotiation,
+        110 => error.AlertUnsupportedExtension,
+        else => error.ServerMalformedResponse,
+    };
 }
 
 fn Sha256Reader(comptime Reader: anytype) type {
@@ -506,7 +530,6 @@ fn verify_signature(
             try llmod(&curr_base, modulus);
             try curr_exponent.shiftRight(curr_exponent, 1);
         }
-        try llmod(&encrypted_signature, modulus);
     }
     // EMSA-PKCS1-V1_5-ENCODE
     if (encrypted_signature.limbs.len * @sizeOf(usize) < signature.data.len)
