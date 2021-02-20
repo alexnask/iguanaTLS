@@ -842,7 +842,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -850,11 +850,11 @@ pub const curves = struct {
             } else unreachable;
         }
 
-        inline fn make_pre_master_secret(
+        fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [32]u8,
-        ) ![]const u8 {
+        ) callconv(.Inline) ![]const u8 {
             pre_master_secret_buf[0..32].* = std.crypto.dh.X25519.scalarmult(
                 key_pair.secret_key,
                 server_public_key.*,
@@ -869,17 +869,17 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
         }
 
-        inline fn make_pre_master_secret(
+        fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [97]u8,
-        ) ![]const u8 {
+        ) callconv(.Inline) ![]const u8 {
             pre_master_secret_buf[0..96].* = crypto.ecc.scalarmult(
                 crypto.ecc.SECP384R1,
                 server_public_key[1..].*,
@@ -895,17 +895,17 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
         }
 
-        inline fn make_pre_master_secret(
+        fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [65]u8,
-        ) ![]const u8 {
+        ) callconv(.Inline) ![]const u8 {
             pre_master_secret_buf[0..64].* = crypto.ecc.scalarmult(
                 crypto.ecc.SECP256R1,
                 server_public_key[1..].*,
@@ -955,7 +955,7 @@ pub const curves = struct {
         });
     }
 
-    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) KeyPair(list) {
+    fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) callconv(.Inline) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -964,13 +964,13 @@ pub const curves = struct {
         unreachable;
     }
 
-    inline fn make_pre_master_secret(
+    fn make_pre_master_secret(
         comptime list: anytype,
         curve_id: u16,
         key_pair: KeyPair(list),
         pre_master_secret_buf: *[max_pre_master_secret_len(list)]u8,
         server_public_key: [max_pub_key_len(list)]u8,
-    ) ![]const u8 {
+    ) callconv(.Inline) ![]const u8 {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return try curve.make_pre_master_secret(
@@ -1453,11 +1453,11 @@ pub fn client_connect(
         };
 
         const next_32_bytes = struct {
-            inline fn f(
+            fn f(
                 state: *KeyExpansionState,
                 comptime chunk_idx: comptime_int,
                 chunk: *[32]u8,
-            ) void {
+            ) callconv(.Inline) void {
                 if (chunk_idx == 0) {
                     Hmac256.create(state.a1[0..32], state.seed, state.master_secret);
                     Hmac256.create(chunk, state.a1, state.master_secret);
