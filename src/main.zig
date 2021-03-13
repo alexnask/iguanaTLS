@@ -353,6 +353,51 @@ fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reade
     };
 }
 
+fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    const schema = .{
+        .sequence_of,
+        .{ .capture, 0, .sequence },
+    };
+    const captures = .{
+        state, add_cert_extension,
+    };
+
+    try asn1.der.parse_schema(schema, captures, reader);
+}
+
+fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    // TODO: manually parse this to make it allocation free
+    const object_id = try asn1.der.parse_value(state.allocator, reader);
+    defer object_id.deinit(state.allocator);
+    if (object_id != .object_identifier) return error.DoesNotMatchSchema;
+    if (object_id.object_identifier.len != 4)
+        return;
+
+    const data = object_id.object_identifier.data;
+    // Prefix == id-ce
+    if (data[0] != 2 or data[1] != 5 or data[2] != 29)
+        return;
+
+    switch (data[3]) {
+        17 => {
+            const subject_alt_name = try asn1.der.parse_value(state.allocator, reader);
+            defer subject_alt_name.deinit(state.allocator);
+
+            switch (subject_alt_name) {
+                .octet_string => |s| {
+                    // TODO: remove the allocating parser
+                    // It copies the bytes out for nothing and this uses the original buffer instead
+                    const start = state.fbs.pos - s.len;
+                    state.list.items[state.list.items.len - 1].raw_subject_alternative_name =
+                        state.fbs.buffer[start..state.fbs.pos];
+                },
+                else => return error.DoesNotMatchSchema,
+            }
+        },
+        else => {},
+    }
+}
+
 fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
     const is_ca = state.list.items.len != 0;
 
@@ -369,6 +414,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         .bytes = cert_bytes,
         .dn = undefined,
         .common_name = &[0]u8{},
+        .raw_subject_alternative_name = &[0]u8{},
         .public_key = x509.PublicKey.empty,
         .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
@@ -386,7 +432,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
             .{ .capture, 2, .sequence }, // subjectPublicKeyInfo
             .{ .optional, .context_specific, 1 }, // issuerUniqueID
             .{ .optional, .context_specific, 2 }, // subjectUniqueID
-            .{ .optional, .context_specific, 3 }, // extensions
+            .{ .capture, 3, .optional, .context_specific, 3 }, // extensions
         },
     };
 
@@ -394,6 +440,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         std.time.timestamp(), check_cert_timestamp,
         state,                add_cert_subject_dn,
         state,                add_cert_public_key,
+        state,                add_cert_extensions,
     };
 
     var fbs = std.io.fixedBufferStream(@as([]const u8, cert_bytes[1 + encoded_length.len ..]));
@@ -609,6 +656,7 @@ const ServerCertificate = struct {
     bytes: []const u8,
     dn: []const u8,
     common_name: []const u8,
+    raw_subject_alternative_name: []const u8,
     public_key: x509.PublicKey,
     signature: asn1.BitString,
     signature_algorithm: SignatureAlgorithm,
