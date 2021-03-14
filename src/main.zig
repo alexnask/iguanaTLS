@@ -661,6 +661,32 @@ const ServerCertificate = struct {
     signature: asn1.BitString,
     signature_algorithm: SignatureAlgorithm,
     is_ca: bool,
+
+    fn iterSAN(self: ServerCertificate) NameIterator {
+        return .{ .cert = self };
+    }
+
+    const NameIterator = struct {
+        cert: ServerCertificate,
+        pos: usize = 0,
+
+        fn next(self: *NameIterator) ?[]const u8 {
+            if (self.pos >= self.cert.raw_subject_alternative_name.len) {
+                return null;
+            }
+            if (self.pos == 0) {
+                std.debug.assert(self.cert.raw_subject_alternative_name[0] == 0x30);
+                std.debug.assert(self.cert.raw_subject_alternative_name[1] == self.cert.raw_subject_alternative_name.len - 2);
+                self.pos += 2;
+            }
+            std.debug.assert(self.cert.raw_subject_alternative_name[self.pos] == 0x82);
+            const len = self.cert.raw_subject_alternative_name[self.pos + 1];
+            const start = self.pos + 2;
+            const end = start + len;
+            self.pos = end;
+            return self.cert.raw_subject_alternative_name[start..end];
+        }
+    };
 };
 
 const VerifierCaptureState = struct {
@@ -696,6 +722,26 @@ fn reverse_split(buffer: []const u8, delimiter: []const u8) ReverseSplitIterator
         .buffer = buffer,
         .delimiter = delimiter,
     };
+}
+
+fn cert_name_matches(cert_name: []const u8, hostname: []const u8) bool {
+    var cert_name_split = reverse_split(cert_name, ".");
+    var hostname_split = reverse_split(hostname, ".");
+    while (true) {
+        const cn_part = cert_name_split.next();
+        const hn_part = hostname_split.next();
+
+        if (cn_part) |cnp| {
+            if (hn_part == null and cert_name_split.index == null and mem.eql(u8, cnp, "www"))
+                return true
+            else if (hn_part) |hnp| {
+                if (mem.eql(u8, cnp, "*"))
+                    continue;
+                if (!mem.eql(u8, cnp, hnp))
+                    return false;
+            }
+        } else return hn_part == null;
+    }
 }
 
 pub fn default_cert_verifier(
@@ -755,28 +801,20 @@ pub fn default_cert_verifier(
 
     const chain = capture_state.list.items;
     if (chain.len == 0) return error.CertificateVerificationFailed;
-    // Check if the hostname matches the leaf certificate's common name
-    {
-        var common_name_split = reverse_split(chain[0].common_name, ".");
-        var hostname_split = reverse_split(hostname, ".");
-        while (true) {
-            const cn_part = common_name_split.next();
-            const hn_part = hostname_split.next();
-
-            if (cn_part) |cnp| {
-                if (hn_part == null and common_name_split.index == null and mem.eql(u8, cnp, "www"))
-                    break
-                else if (hn_part) |hnp| {
-                    if (mem.eql(u8, cnp, "*"))
-                        continue;
-                    if (!mem.eql(u8, cnp, hnp))
-                        return error.CertificateVerificationFailed;
-                }
-            } else if (hn_part != null)
-                return error.CertificateVerificationFailed
-            else
-                break;
+    // Check if the hostname matches one of the leaf certificate's names
+    name_matched: {
+        if (cert_name_matches(chain[0].common_name, hostname)) {
+            break :name_matched;
         }
+
+        var iter = chain[0].iterSAN();
+        while (iter.next()) |cert_name| {
+            if (cert_name_matches(cert_name, hostname)) {
+                break :name_matched;
+            }
+        }
+
+        return error.CertificateVerificationFailed;
     }
 
     var i: usize = 0;
