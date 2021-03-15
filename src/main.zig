@@ -662,12 +662,25 @@ const ServerCertificate = struct {
     signature_algorithm: SignatureAlgorithm,
     is_ca: bool,
 
-    fn iterSAN(self: ServerCertificate) NameIterator {
-        return .{ .cert = self };
+    const GeneralName = enum(u5) {
+        otherName = 0,
+        rfc822Name = 1,
+        dNSName = 2,
+        x400Address = 3,
+        directoryName = 4,
+        ediPartyName = 5,
+        uniformResourceIdentifier = 6,
+        iPAddress = 7,
+        registeredID = 8,
+    };
+
+    fn iterSAN(self: ServerCertificate, choice: GeneralName) NameIterator {
+        return .{ .cert = self, .choice = choice };
     }
 
     const NameIterator = struct {
         cert: ServerCertificate,
+        choice: GeneralName,
         pos: usize = 0,
 
         fn next(self: *NameIterator) ?[]const u8 {
@@ -679,12 +692,18 @@ const ServerCertificate = struct {
                 std.debug.assert(self.cert.raw_subject_alternative_name[1] == self.cert.raw_subject_alternative_name.len - 2);
                 self.pos += 2;
             }
-            std.debug.assert(self.cert.raw_subject_alternative_name[self.pos] == 0x82);
-            const len = self.cert.raw_subject_alternative_name[self.pos + 1];
-            const start = self.pos + 2;
-            const end = start + len;
-            self.pos = end;
-            return self.cert.raw_subject_alternative_name[start..end];
+            while (self.pos < self.cert.raw_subject_alternative_name.len) {
+                const choice = self.cert.raw_subject_alternative_name[self.pos];
+                std.debug.assert(choice >= 0x80);
+                const len = self.cert.raw_subject_alternative_name[self.pos + 1];
+                const start = self.pos + 2;
+                const end = start + len;
+                self.pos = end;
+                if (@enumToInt(self.choice) == choice - 0x80) {
+                    return self.cert.raw_subject_alternative_name[start..end];
+                }
+            }
+            return null;
         }
     };
 };
@@ -807,7 +826,7 @@ pub fn default_cert_verifier(
             break :name_matched;
         }
 
-        var iter = chain[0].iterSAN();
+        var iter = chain[0].iterSAN(.dNSName);
         while (iter.next()) |cert_name| {
             if (cert_name_matches(cert_name, hostname)) {
                 break :name_matched;
