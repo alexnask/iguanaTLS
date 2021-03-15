@@ -366,7 +366,10 @@ fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, rea
 }
 
 fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
-    // TODO: manually parse this to make it allocation free
+    const start = state.fbs.pos;
+
+    // The happy path is allocation free
+    // TODO: add a preflight check to mandate a specific tag
     const object_id = try asn1.der.parse_value(state.allocator, reader);
     defer object_id.deinit(state.allocator);
     if (object_id != .object_identifier) return error.DoesNotMatchSchema;
@@ -380,18 +383,28 @@ fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, read
 
     switch (data[3]) {
         17 => {
-            const subject_alt_name = try asn1.der.parse_value(state.allocator, reader);
-            defer subject_alt_name.deinit(state.allocator);
+            const san_tag = try reader.readByte();
+            if (san_tag != @enumToInt(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
 
-            switch (subject_alt_name) {
-                .octet_string => |s| {
-                    // TODO: remove the allocating parser
-                    // It copies the bytes out for nothing and this uses the original buffer instead
-                    const start = state.fbs.pos - s.len;
-                    state.list.items[state.list.items.len - 1].raw_subject_alternative_name =
-                        state.fbs.buffer[start..state.fbs.pos];
-                },
-                else => return error.DoesNotMatchSchema,
+            const san_length = try asn1.der.parse_length(reader);
+
+            const body_tag = try reader.readByte();
+            if (body_tag != @enumToInt(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
+
+            const body_length = try asn1.der.parse_length(reader);
+            const total_read = state.fbs.pos - start;
+            if (total_read + body_length > length) return error.DoesNotMatchSchema;
+
+            state.list.items[state.list.items.len - 1].raw_subject_alternative_name = state.fbs.buffer[state.fbs.pos .. state.fbs.pos + body_length];
+
+            // Validate to make sure this is iterable later
+            const ref = state.fbs.pos;
+            while (state.fbs.pos - ref < body_length) {
+                const choice = try reader.readByte();
+                if (choice < 0x80) return error.DoesNotMatchSchema;
+
+                const chunk_length = try asn1.der.parse_length(reader);
+                _ = try reader.skipBytes(chunk_length, .{});
             }
         },
         else => {},
@@ -684,14 +697,6 @@ const ServerCertificate = struct {
         pos: usize = 0,
 
         fn next(self: *NameIterator) ?[]const u8 {
-            if (self.pos >= self.cert.raw_subject_alternative_name.len) {
-                return null;
-            }
-            if (self.pos == 0) {
-                std.debug.assert(self.cert.raw_subject_alternative_name[0] == 0x30);
-                std.debug.assert(self.cert.raw_subject_alternative_name[1] == self.cert.raw_subject_alternative_name.len - 2);
-                self.pos += 2;
-            }
             while (self.pos < self.cert.raw_subject_alternative_name.len) {
                 const choice = self.cert.raw_subject_alternative_name[self.pos];
                 std.debug.assert(choice >= 0x80);
@@ -1826,6 +1831,35 @@ test "HTTPS request on wikipedia main page" {
     defer std.testing.allocator.free(html_contents);
 
     try client.reader().readNoEof(html_contents);
+}
+
+test "HTTPS request on wikipedia alternate name" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "en.m.wikipedia.org", 443);
+    defer sock.close();
+
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DSTRootCAX3.crt.pem"));
+    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    var client = try client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = trusted_chain.data.items,
+        .ciphersuites = .{ciphersuites.ECDHE_RSA_Chacha20_Poly1305},
+        .protocols = &[_][]const u8{"http/1.1"},
+        .curves = .{curves.x25519},
+    }, "en.m.wikipedia.org");
+    defer client.close_notify() catch {};
 }
 
 test "HTTPS request on twitch oath2 endpoint" {
