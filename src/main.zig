@@ -353,6 +353,64 @@ fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reade
     };
 }
 
+fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    const schema = .{
+        .sequence_of,
+        .{ .capture, 0, .sequence },
+    };
+    const captures = .{
+        state, add_cert_extension,
+    };
+
+    try asn1.der.parse_schema(schema, captures, reader);
+}
+
+fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    const start = state.fbs.pos;
+
+    // The happy path is allocation free
+    // TODO: add a preflight check to mandate a specific tag
+    const object_id = try asn1.der.parse_value(state.allocator, reader);
+    defer object_id.deinit(state.allocator);
+    if (object_id != .object_identifier) return error.DoesNotMatchSchema;
+    if (object_id.object_identifier.len != 4)
+        return;
+
+    const data = object_id.object_identifier.data;
+    // Prefix == id-ce
+    if (data[0] != 2 or data[1] != 5 or data[2] != 29)
+        return;
+
+    switch (data[3]) {
+        17 => {
+            const san_tag = try reader.readByte();
+            if (san_tag != @enumToInt(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
+
+            const san_length = try asn1.der.parse_length(reader);
+
+            const body_tag = try reader.readByte();
+            if (body_tag != @enumToInt(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
+
+            const body_length = try asn1.der.parse_length(reader);
+            const total_read = state.fbs.pos - start;
+            if (total_read + body_length > length) return error.DoesNotMatchSchema;
+
+            state.list.items[state.list.items.len - 1].raw_subject_alternative_name = state.fbs.buffer[state.fbs.pos .. state.fbs.pos + body_length];
+
+            // Validate to make sure this is iterable later
+            const ref = state.fbs.pos;
+            while (state.fbs.pos - ref < body_length) {
+                const choice = try reader.readByte();
+                if (choice < 0x80) return error.DoesNotMatchSchema;
+
+                const chunk_length = try asn1.der.parse_length(reader);
+                _ = try reader.skipBytes(chunk_length, .{});
+            }
+        },
+        else => {},
+    }
+}
+
 fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
     const is_ca = state.list.items.len != 0;
 
@@ -369,6 +427,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         .bytes = cert_bytes,
         .dn = undefined,
         .common_name = &[0]u8{},
+        .raw_subject_alternative_name = &[0]u8{},
         .public_key = x509.PublicKey.empty,
         .signature = asn1.BitString{ .data = &[0]u8{}, .bit_len = 0 },
         .signature_algorithm = undefined,
@@ -386,7 +445,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
             .{ .capture, 2, .sequence }, // subjectPublicKeyInfo
             .{ .optional, .context_specific, 1 }, // issuerUniqueID
             .{ .optional, .context_specific, 2 }, // subjectUniqueID
-            .{ .optional, .context_specific, 3 }, // extensions
+            .{ .capture, 3, .optional, .context_specific, 3 }, // extensions
         },
     };
 
@@ -394,6 +453,7 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
         std.time.timestamp(), check_cert_timestamp,
         state,                add_cert_subject_dn,
         state,                add_cert_public_key,
+        state,                add_cert_extensions,
     };
 
     var fbs = std.io.fixedBufferStream(@as([]const u8, cert_bytes[1 + encoded_length.len ..]));
@@ -609,10 +669,48 @@ const ServerCertificate = struct {
     bytes: []const u8,
     dn: []const u8,
     common_name: []const u8,
+    raw_subject_alternative_name: []const u8,
     public_key: x509.PublicKey,
     signature: asn1.BitString,
     signature_algorithm: SignatureAlgorithm,
     is_ca: bool,
+
+    const GeneralName = enum(u5) {
+        otherName = 0,
+        rfc822Name = 1,
+        dNSName = 2,
+        x400Address = 3,
+        directoryName = 4,
+        ediPartyName = 5,
+        uniformResourceIdentifier = 6,
+        iPAddress = 7,
+        registeredID = 8,
+    };
+
+    fn iterSAN(self: ServerCertificate, choice: GeneralName) NameIterator {
+        return .{ .cert = self, .choice = choice };
+    }
+
+    const NameIterator = struct {
+        cert: ServerCertificate,
+        choice: GeneralName,
+        pos: usize = 0,
+
+        fn next(self: *NameIterator) ?[]const u8 {
+            while (self.pos < self.cert.raw_subject_alternative_name.len) {
+                const choice = self.cert.raw_subject_alternative_name[self.pos];
+                std.debug.assert(choice >= 0x80);
+                const len = self.cert.raw_subject_alternative_name[self.pos + 1];
+                const start = self.pos + 2;
+                const end = start + len;
+                self.pos = end;
+                if (@enumToInt(self.choice) == choice - 0x80) {
+                    return self.cert.raw_subject_alternative_name[start..end];
+                }
+            }
+            return null;
+        }
+    };
 };
 
 const VerifierCaptureState = struct {
@@ -648,6 +746,26 @@ fn reverse_split(buffer: []const u8, delimiter: []const u8) ReverseSplitIterator
         .buffer = buffer,
         .delimiter = delimiter,
     };
+}
+
+fn cert_name_matches(cert_name: []const u8, hostname: []const u8) bool {
+    var cert_name_split = reverse_split(cert_name, ".");
+    var hostname_split = reverse_split(hostname, ".");
+    while (true) {
+        const cn_part = cert_name_split.next();
+        const hn_part = hostname_split.next();
+
+        if (cn_part) |cnp| {
+            if (hn_part == null and cert_name_split.index == null and mem.eql(u8, cnp, "www"))
+                return true
+            else if (hn_part) |hnp| {
+                if (mem.eql(u8, cnp, "*"))
+                    continue;
+                if (!mem.eql(u8, cnp, hnp))
+                    return false;
+            }
+        } else return hn_part == null;
+    }
 }
 
 pub fn default_cert_verifier(
@@ -707,28 +825,20 @@ pub fn default_cert_verifier(
 
     const chain = capture_state.list.items;
     if (chain.len == 0) return error.CertificateVerificationFailed;
-    // Check if the hostname matches the leaf certificate's common name
-    {
-        var common_name_split = reverse_split(chain[0].common_name, ".");
-        var hostname_split = reverse_split(hostname, ".");
-        while (true) {
-            const cn_part = common_name_split.next();
-            const hn_part = hostname_split.next();
-
-            if (cn_part) |cnp| {
-                if (hn_part == null and common_name_split.index == null and mem.eql(u8, cnp, "www"))
-                    break
-                else if (hn_part) |hnp| {
-                    if (mem.eql(u8, cnp, "*"))
-                        continue;
-                    if (!mem.eql(u8, cnp, hnp))
-                        return error.CertificateVerificationFailed;
-                }
-            } else if (hn_part != null)
-                return error.CertificateVerificationFailed
-            else
-                break;
+    // Check if the hostname matches one of the leaf certificate's names
+    name_matched: {
+        if (cert_name_matches(chain[0].common_name, hostname)) {
+            break :name_matched;
         }
+
+        var iter = chain[0].iterSAN(.dNSName);
+        while (iter.next()) |cert_name| {
+            if (cert_name_matches(cert_name, hostname)) {
+                break :name_matched;
+            }
+        }
+
+        return error.CertificateVerificationFailed;
     }
 
     var i: usize = 0;
@@ -1668,7 +1778,7 @@ test "HTTPS request on wikipedia main page" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "en.wikipedia.org", 443);
     defer sock.close();
 
-    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertHighAssuranceEVRootCA.crt.pem"));
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DSTRootCAX3.crt.pem"));
     var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
@@ -1721,6 +1831,35 @@ test "HTTPS request on wikipedia main page" {
     defer std.testing.allocator.free(html_contents);
 
     try client.reader().readNoEof(html_contents);
+}
+
+test "HTTPS request on wikipedia alternate name" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "en.m.wikipedia.org", 443);
+    defer sock.close();
+
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DSTRootCAX3.crt.pem"));
+    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    var client = try client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = trusted_chain.data.items,
+        .ciphersuites = .{ciphersuites.ECDHE_RSA_Chacha20_Poly1305},
+        .protocols = &[_][]const u8{"http/1.1"},
+        .curves = .{curves.x25519},
+    }, "en.m.wikipedia.org");
+    defer client.close_notify() catch {};
 }
 
 test "HTTPS request on twitch oath2 endpoint" {
