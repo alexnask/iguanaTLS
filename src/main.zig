@@ -1778,7 +1778,7 @@ test "HTTPS request on wikipedia main page" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "en.wikipedia.org", 443);
     defer sock.close();
 
-    var fbs = std.io.fixedBufferStream(@embedFile("../test/DSTRootCAX3.crt.pem"));
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertHighAssuranceEVRootCA.crt.pem"));
     var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
@@ -1837,7 +1837,7 @@ test "HTTPS request on wikipedia alternate name" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "en.m.wikipedia.org", 443);
     defer sock.close();
 
-    var fbs = std.io.fixedBufferStream(@embedFile("../test/DSTRootCAX3.crt.pem"));
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertHighAssuranceEVRootCA.crt.pem"));
     var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
