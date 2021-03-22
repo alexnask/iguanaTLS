@@ -7,7 +7,6 @@ const asn1 = @import("asn1.zig");
 
 // zig fmt: off
 // http://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-8
-// @TODO add backing integer, values
 pub const CurveId = enum {
     sect163k1, sect163r1, sect163r2, sect193r1,
     sect193r2, sect233k1, sect233r1, sect239k1,
@@ -56,6 +55,8 @@ pub const PublicKey = union(enum) {
         }
     }
 };
+
+pub const PrivateKey = PublicKey;
 
 pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
     if ((try reader.readByte()) != 0x30)
@@ -168,7 +169,25 @@ pub fn DecodeDERError(comptime Reader: type) type {
     };
 }
 
-pub const TrustAnchor = struct {
+pub const Certificate = struct {
+    pub const SignatureAlgorithm = struct {
+        hash: enum(u8) {
+            none = 0,
+            md5 = 1,
+            sha1 = 2,
+            sha224 = 3,
+            sha256 = 4,
+            sha384 = 5,
+            sha512 = 6,
+        },
+        signature: enum(u8) {
+            anonymous = 0,
+            rsa = 1,
+            dsa = 2,
+            ecdsa = 3,
+        },
+    };
+
     /// Subject distinguished name
     dn: []const u8,
     /// A "CA" anchor is deemed fit to verify signatures on certificates.
@@ -178,7 +197,7 @@ pub const TrustAnchor = struct {
     public_key: PublicKey,
 
     const CaptureState = struct {
-        self: *TrustAnchor,
+        self: *Certificate,
         allocator: *Allocator,
         dn_allocated: bool = false,
         pk_allocated: bool = false,
@@ -340,17 +359,17 @@ pub const TrustAnchor = struct {
     }
 };
 
-pub const TrustAnchorChain = struct {
-    data: std.ArrayList(TrustAnchor),
+pub const CertificateChain = struct {
+    data: std.ArrayList(Certificate),
 
     pub fn from_pem(allocator: *Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
-        var self = @This(){ .data = std.ArrayList(TrustAnchor).init(allocator) };
+        var self = @This(){ .data = std.ArrayList(Certificate).init(allocator) };
         errdefer self.deinit();
 
         var it = pemCertificateIterator(pem_reader);
         while (try it.next()) |cert_reader| {
             var buffered = std.io.bufferedReader(cert_reader);
-            const anchor = try TrustAnchor.create(allocator, buffered.reader());
+            const anchor = try Certificate.create(allocator, buffered.reader());
             errdefer anchor.deinit(allocator);
             try self.data.append(anchor);
         }
@@ -364,10 +383,241 @@ pub const TrustAnchorChain = struct {
     }
 };
 
-fn PEMSectionReader(comptime Reader: type) type {
+pub fn get_signature_algorithm(
+    reader: anytype,
+) (@TypeOf(reader).Error || error{EndOfStream})!?Certificate.SignatureAlgorithm {
+    const oid_tag = try reader.readByte();
+    if (oid_tag != 0x06)
+        return null;
+
+    const oid_length = try asn1.der.parse_length(reader);
+    if (oid_length == 9) {
+        var oid_bytes: [9]u8 = undefined;
+        try reader.readNoEof(&oid_bytes);
+
+        if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 })) {
+            // TODO: Is hash actually none here?
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .none };
+        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x04 })) {
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .md5 };
+        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05 })) {
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .sha1 };
+        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B })) {
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .sha256 };
+        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C })) {
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .sha384 };
+        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D })) {
+            return Certificate.SignatureAlgorithm{ .signature = .rsa, .hash = .sha512 };
+        } else {
+            return null;
+        }
+        return;
+    } else if (oid_length == 10) {
+        // TODO
+        // ECDSA + <Hash> algorithms
+    }
+    return null;
+}
+
+pub const ClientCertificateChain = struct {
+    /// Number of certificates in the chain
+    cert_len: usize,
+    /// Contains the raw data of each certificate in the certificate chain
+    raw_certs: [*]const []const u8,
+    /// Issuer distinguished name in DER format of each certificate in the certificate chain
+    /// issuer_dn[N] is a dubslice of raw[N]
+    cert_issuer_dns: [*]const []const u8,
+    signature_algorithm: Certificate.SignatureAlgorithm,
+    private_key: PrivateKey,
+
+    // TODO: Encrypted private keys, non-RSA private keys
+    pub fn from_pem(allocator: *Allocator, pem_reader: anytype) !@This() {
+        var it = PEMSectionIterator(@TypeOf(pem_reader), .{
+            .section_names = &.{
+                "X.509 CERTIFICATE",
+                "CERTIFICATE",
+                "RSA PRIVATE KEY",
+            },
+            .skip_irrelevant_lines = true,
+        }){ .reader = pem_reader };
+
+        var raw_certs = std.ArrayListUnmanaged([]const u8){};
+        var cert_issuer_dns = std.ArrayList([]const u8).init(allocator);
+        errdefer {
+            for (raw_certs.items) |bytes| {
+                allocator.free(bytes);
+            }
+            raw_certs.deinit(allocator);
+            cert_issuer_dns.deinit();
+        }
+
+        var signature_algorithm: Certificate.SignatureAlgorithm = undefined;
+        var private_key: ?PrivateKey = null;
+        errdefer if (private_key) |pk| {
+            pk.deinit(allocator);
+        };
+
+        while (try it.next()) |state_and_reader| {
+            switch (state_and_reader.state) {
+                .@"X.509 CERTIFICATE", .@"CERTIFICATE" => {
+                    const cert_bytes = try state_and_reader.reader.readAllAlloc(allocator, std.math.maxInt(usize));
+                    errdefer allocator.free(cert_bytes);
+                    try raw_certs.append(allocator, cert_bytes);
+
+                    const schema = .{
+                        .sequence, .{
+                            // tbsCertificate
+                            .{
+                                .sequence,
+                                .{
+                                    .{ .context_specific, 0 }, // version
+                                    .{.int}, // serialNumber
+                                    .{.sequence}, // signature
+                                    .{ .capture, 0, .sequence }, // issuer
+                                    .{.sequence}, // validity
+                                    .{.sequence}, // subject
+                                    .{.sequence}, // subjectPublicKeyInfo
+                                    .{ .optional, .context_specific, 1 }, // issuerUniqueID
+                                    .{ .optional, .context_specific, 2 }, // subjectUniqueID
+                                    .{ .optional, .context_specific, 3 }, // extensions
+                                },
+                            },
+                            // signatureAlgorithm
+                            .{ .capture, 1, .sequence },
+                            // signatureValue
+                            .{.bit_string},
+                        },
+                    };
+
+                    var fbs = std.io.fixedBufferStream(cert_bytes);
+                    const state = .{
+                        .fbs = &fbs,
+                        .dns = &cert_issuer_dns,
+                        .signature_algorithm = &signature_algorithm,
+                    };
+
+                    const captures = .{
+                        state,
+                        struct {
+                            fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
+                                // TODO: Some way to get tag + length buffer directly in the capture callback?
+                                const encoded_length = asn1.der.encode_length(length).slice();
+                                const pos = _state.fbs.pos;
+                                const dn = _state.fbs.buffer[pos - encoded_length.len - 1 .. pos + length];
+                                try _state.dns.append(dn);
+                            }
+                        }.capture,
+                        state,
+                        struct {
+                            fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
+                                if (_state.dns.items.len == 1)
+                                    _state.signature_algorithm.* = (try get_signature_algorithm(reader)) orelse
+                                        return error.InvalidSignatureAlgorithm;
+                            }
+                        }.capture,
+                    };
+
+                    asn1.der.parse_schema(schema, captures, fbs.reader()) catch |err| switch (err) {
+                        error.DoesNotMatchSchema,
+                        error.EndOfStream,
+                        error.InvalidTag,
+                        error.InvalidLength,
+                        error.InvalidSignatureAlgorithm,
+                        error.InvalidContainerLength,
+                        => return error.InvalidCertificate,
+                        error.OutOfMemory => return error.OutOfMemory,
+                    };
+                },
+                .@"RSA PRIVATE KEY" => {
+                    if (private_key != null)
+                        return error.MultiplePrivateKeys;
+
+                    const schema = .{
+                        .sequence, .{
+                            .{.int}, // version
+                            .{ .capture, 0, .int }, //modulus
+                            .{.int}, //publicExponent
+                            .{ .capture, 1, .int }, //privateExponent
+                            .{.int}, // prime1
+                            .{.int}, //prime2
+                            .{.int}, //exponent1
+                            .{.int}, //exponent2
+                            .{.int}, //coefficient
+                            .{ .optional, .any }, //otherPrimeInfos
+                        },
+                    };
+
+                    private_key = .{ .rsa = undefined };
+                    const state = .{
+                        .modulus = &private_key.?.rsa.modulus,
+                        .exponent = &private_key.?.rsa.exponent,
+                        .allocator = allocator,
+                    };
+
+                    const captures = .{
+                        state,
+                        struct {
+                            fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
+                                _state.modulus.* = (try asn1.der.parse_int_with_length(
+                                    _state.allocator,
+                                    length,
+                                    reader,
+                                )).limbs;
+                            }
+                        }.capture,
+                        state,
+                        struct {
+                            fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
+                                _state.exponent.* = (try asn1.der.parse_int_with_length(
+                                    _state.allocator,
+                                    length,
+                                    reader,
+                                )).limbs;
+                            }
+                        }.capture,
+                    };
+
+                    asn1.der.parse_schema(schema, captures, state_and_reader.reader) catch |err| switch (err) {
+                        error.DoesNotMatchSchema,
+                        error.EndOfStream,
+                        error.InvalidTag,
+                        error.InvalidLength,
+                        error.InvalidContainerLength,
+                        => return error.InvalidPrivateKey,
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.MalformedPEM => return error.MalformedPEM,
+                    };
+                },
+                .none, .other => unreachable,
+            }
+        }
+        if (private_key == null)
+            return error.NoPrivateKey;
+
+        std.debug.assert(cert_issuer_dns.items.len == raw_certs.items.len);
+        return @This(){
+            .cert_len = raw_certs.items.len,
+            .raw_certs = raw_certs.toOwnedSlice(allocator).ptr,
+            .cert_issuer_dns = cert_issuer_dns.toOwnedSlice().ptr,
+            .signature_algorithm = signature_algorithm,
+            .private_key = private_key.?,
+        };
+    }
+
+    pub fn deinit(self: *@This(), allocator: *Allocator) void {
+        for (self.raw_certs[0..self.cert_len]) |cert_bytes| {
+            allocator.free(cert_bytes);
+        }
+        allocator.free(self.raw_certs[0..self.cert_len]);
+        allocator.free(self.cert_issuer_dns[0..self.cert_len]);
+        self.private_key.deinit(allocator);
+    }
+};
+
+fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorOptions) type {
     const Error = Reader.Error || error{MalformedPEM};
     const read = struct {
-        fn f(it: *PEMCertificateIterator(Reader), buf: []u8) Error!usize {
+        fn f(it: *PEMSectionIterator(Reader, options), buf: []u8) Error!usize {
             var out_idx: usize = 0;
             if (it.waiting_chars_len > 0) {
                 const rest_written = std.math.min(it.waiting_chars_len, buf.len);
@@ -384,7 +634,7 @@ fn PEMSectionReader(comptime Reader: type) type {
                     return out_idx;
                 }
             }
-            if (it.state != .in_section)
+            if (it.state == .none)
                 return out_idx;
 
             var base64_buf: [4]u8 = undefined;
@@ -449,31 +699,59 @@ fn PEMSectionReader(comptime Reader: type) type {
     }.f;
 
     return std.io.Reader(
-        *PEMCertificateIterator(Reader),
+        *PEMSectionIterator(Reader, options),
         Error,
         read,
     );
 }
 
-fn PEMCertificateIterator(comptime Reader: type) type {
+const PEMSectionIteratorOptions = struct {
+    section_names: []const []const u8,
+    skip_irrelevant_lines: bool = false,
+};
+
+fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIteratorOptions) type {
+    var biggest_name_len = 0;
+
+    var fields: [options.section_names.len + 2]std.builtin.TypeInfo.EnumField = undefined;
+    fields[0] = .{ .name = "none", .value = 0 };
+    fields[1] = .{ .name = "other", .value = 1 };
+    for (fields[2..]) |*field, idx| {
+        field.name = options.section_names[idx];
+        field.value = @as(u8, idx + 2);
+        if (field.name.len > biggest_name_len)
+            biggest_name_len = field.name.len;
+    }
+
+    const StateEnum = @Type(.{
+        .Enum = .{
+            .layout = .Auto,
+            .tag_type = u8,
+            .fields = &fields,
+            .decls = &.{},
+            .is_exhaustive = true,
+        },
+    });
+
     return struct {
-        pub const SectionReader = PEMSectionReader(Reader);
+        pub const SectionReader = PEMSectionReader(Reader, options);
+        pub const StateAndName = struct {
+            state: StateEnum,
+            reader: SectionReader,
+        };
         pub const NextError = SectionReader.Error || error{EndOfStream};
 
         reader: Reader,
         // Internal state for the iterator and the current reader.
-        state: enum {
-            none,
-            in_other,
-            in_section,
-        } = .none,
+        state: StateEnum = .none,
         waiting_chars: [4]u8 = undefined,
         waiting_chars_len: u2 = 0,
 
-        // @TODO More verification, this will accept lots of invalid PEM
-        pub fn next(self: *@This()) NextError!?SectionReader {
+        // TODO More verification, this will accept lots of invalid PEM
+        // TODO Simplify code
+        pub fn next(self: *@This()) NextError!?StateAndName {
             self.waiting_chars_len = 0;
-            while (true) {
+            outer_loop: while (true) {
                 const byte = self.reader.readByte() catch |err| switch (err) {
                     error.EndOfStream => if (self.state == .none)
                         return null
@@ -491,43 +769,51 @@ fn PEMCertificateIterator(comptime Reader: type) type {
                         '\r', '\n', ' ', '\t' => continue,
                         '-' => {
                             if (try self.reader.isBytes("----BEGIN ")) {
-                                const first_section_byte = try self.reader.readByte();
-                                if (first_section_byte == 'C') {
-                                    const rest = "ERTIFICATE";
-                                    var matched: usize = 0;
-                                    while ((try self.reader.readByte()) == rest[matched]) : (matched += 1) {
-                                        if (matched == rest.len - 1) {
+                                var name_char_idx: usize = 0;
+                                var name_buf: [biggest_name_len]u8 = undefined;
+
+                                while (true) {
+                                    const next_byte = try self.reader.readByte();
+                                    switch (next_byte) {
+                                        '-' => {
                                             try self.reader.skipUntilDelimiterOrEof('\n');
-                                            self.state = .in_section;
-                                            return SectionReader{ .context = self };
-                                        }
+                                            const name = name_buf[0..name_char_idx];
+                                            for (options.section_names) |sec_name, idx| {
+                                                if (mem.eql(u8, sec_name, name)) {
+                                                    self.state = @intToEnum(StateEnum, @intCast(u8, idx + 2));
+                                                    return StateAndName{
+                                                        .reader = .{ .context = self },
+                                                        .state = self.state,
+                                                    };
+                                                }
+                                            }
+                                            self.state = .other;
+                                            continue :outer_loop;
+                                        },
+                                        '\n' => return error.MalformedPEM,
+                                        else => {
+                                            if (name_char_idx == biggest_name_len) {
+                                                try self.reader.skipUntilDelimiterOrEof('\n');
+                                                self.state = .other;
+                                                continue :outer_loop;
+                                            }
+                                            name_buf[name_char_idx] = next_byte;
+                                            name_char_idx += 1;
+                                        },
                                     }
-                                    try self.reader.skipUntilDelimiterOrEof('\n');
-                                    self.state = .in_other;
-                                    continue;
-                                } else if (first_section_byte == 'X') {
-                                    const rest = ".509 CERTIFICATE";
-                                    var matched: usize = 0;
-                                    while ((try self.reader.readByte()) == rest[matched]) : (matched += 1) {
-                                        if (matched == rest.len - 1) {
-                                            try self.reader.skipUntilDelimiterOrEof('\n');
-                                            self.state = .in_section;
-                                            return SectionReader{ .context = self };
-                                        }
-                                    }
-                                    try self.reader.skipUntilDelimiterOrEof('\n');
-                                    self.state = .in_other;
-                                    continue;
-                                } else {
-                                    try self.reader.skipUntilDelimiterOrEof('\n');
-                                    self.state = .in_other;
-                                    continue;
                                 }
                             } else return error.MalformedPEM;
                         },
-                        else => return error.MalformedPEM,
+                        else => {
+                            if (options.skip_irrelevant_lines) {
+                                try self.reader.skipUntilDelimiterOrEof('\n');
+                                continue;
+                            } else {
+                                return error.MalformedPEM;
+                            }
+                        },
                     },
-                    .in_other, .in_section => switch (byte) {
+                    else => switch (byte) {
                         '#' => {
                             try self.reader.skipUntilDelimiterOrEof('\n');
                             continue;
@@ -540,11 +826,28 @@ fn PEMCertificateIterator(comptime Reader: type) type {
                                 continue;
                             } else return error.MalformedPEM;
                         },
-                        // @TODO Make sure the character is base64
+                        // TODO: Make sure the character is base64
                         else => continue,
                     },
                 }
             }
+        }
+    };
+}
+
+fn PEMCertificateIterator(comptime Reader: type) type {
+    const SectionIterator = PEMSectionIterator(Reader, .{
+        .section_names = &.{ "X.509 CERTIFICATE", "CERTIFICATE" },
+    });
+
+    return struct {
+        pub const SectionReader = SectionIterator.SectionReader;
+        pub const NextError = SectionReader.Error || error{EndOfStream};
+
+        section_it: SectionIterator,
+
+        pub fn next(self: *@This()) NextError!?SectionReader {
+            return ((try self.section_it.next()) orelse return null).reader;
         }
     };
 }
@@ -555,7 +858,7 @@ fn PEMCertificateIterator(comptime Reader: type) type {
 /// Iterator.SectionReader is the type of the io.Reader, Iterator.NextError is the error
 /// set of the next() function.
 pub fn pemCertificateIterator(reader: anytype) PEMCertificateIterator(@TypeOf(reader)) {
-    return .{ .reader = reader };
+    return .{ .section_it = .{ .reader = reader } };
 }
 
 pub const NameElement = struct {
@@ -610,7 +913,7 @@ test "pemCertificateIterator" {
             \\-----BEGIN BOGUS-----
             \\-----END BOGUS-----
             \\
-            ++ github_pem,
+        ++ github_pem,
         &[2][]const u8{ github_der, github_der },
     );
 
@@ -651,7 +954,7 @@ test "pemCertificateIterator" {
     }
 }
 
-test "TrustAnchorChain" {
+test "CertificateChain" {
     var fbs = std.io.fixedBufferStream(github_pem ++
         \\
         \\# Hellenic Academic and Research Institutions RootCA 2011
@@ -716,6 +1019,6 @@ test "TrustAnchorChain" {
         \\hNQ+IIX3Sj0rnP0qCglN6oH4EZw=
         \\-----END CERTIFICATE-----
     );
-    const chain = try TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    const chain = try CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer chain.deinit();
 }

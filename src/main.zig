@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const Sha224 = std.crypto.hash.sha2.Sha224;
 const Sha384 = std.crypto.hash.sha2.Sha384;
 const Sha512 = std.crypto.hash.sha2.Sha512;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -12,6 +13,8 @@ pub const crypto = @import("crypto.zig");
 
 const ciphers = @import("ciphersuites.zig");
 pub const ciphersuites = ciphers.suites;
+
+pub const @"pcks1v1.5" = @import("pcks1-1_5.zig");
 
 comptime {
     std.testing.refAllDecls(x509);
@@ -129,16 +132,32 @@ pub fn alert_byte_to_error(b: u8) (ServerAlert || error{ServerMalformedResponse}
     };
 }
 
-fn Sha256Reader(comptime Reader: anytype) type {
+// TODO: Now that we keep all the hashes, check the ciphersuite for the hash
+//   type used and use it where necessary instead of hardcoding sha256
+const HashSet = struct {
+    sha224: Sha224,
+    sha256: Sha256,
+    sha384: Sha384,
+    sha512: Sha512,
+
+    fn update(self: *@This(), buf: []const u8) void {
+        self.sha224.update(buf);
+        self.sha256.update(buf);
+        self.sha384.update(buf);
+        self.sha512.update(buf);
+    }
+};
+
+fn HashingReader(comptime Reader: anytype) type {
     const State = struct {
-        sha256: *Sha256,
+        hash_set: *HashSet,
         reader: Reader,
     };
     const S = struct {
         pub fn read(state: State, buffer: []u8) Reader.Error!usize {
             const amt = try state.reader.read(buffer);
             if (amt != 0) {
-                state.sha256.update(buffer[0..amt]);
+                state.hash_set.update(buffer[0..amt]);
             }
             return amt;
         }
@@ -146,20 +165,20 @@ fn Sha256Reader(comptime Reader: anytype) type {
     return std.io.Reader(State, Reader.Error, S.read);
 }
 
-fn sha256_reader(sha256: *Sha256, reader: anytype) Sha256Reader(@TypeOf(reader)) {
-    return .{ .context = .{ .sha256 = sha256, .reader = reader } };
+fn make_hashing_reader(hash_set: *HashSet, reader: anytype) HashingReader(@TypeOf(reader)) {
+    return .{ .context = .{ .hash_set = hash_set, .reader = reader } };
 }
 
-fn Sha256Writer(comptime Writer: anytype) type {
+fn HashingWriter(comptime Writer: anytype) type {
     const State = struct {
-        sha256: *Sha256,
+        hash_set: *HashSet,
         writer: Writer,
     };
     const S = struct {
         pub fn write(state: State, buffer: []const u8) Writer.Error!usize {
             const amt = try state.writer.write(buffer);
             if (amt != 0) {
-                state.sha256.update(buffer[0..amt]);
+                state.hash_set.update(buffer[0..amt]);
             }
             return amt;
         }
@@ -167,8 +186,8 @@ fn Sha256Writer(comptime Writer: anytype) type {
     return std.io.Writer(State, Writer.Error, S.write);
 }
 
-fn sha256_writer(sha256: *Sha256, writer: anytype) Sha256Writer(@TypeOf(writer)) {
-    return .{ .context = .{ .sha256 = sha256, .writer = writer } };
+fn make_hashing_writer(hash_set: *HashSet, writer: anytype) HashingWriter(@TypeOf(writer)) {
+    return .{ .context = .{ .hash_set = hash_set, .writer = writer } };
 }
 
 fn CertificateReaderState(comptime Reader: type) type {
@@ -199,10 +218,15 @@ pub const CertificateVerifier = union(enum) {
 };
 
 pub fn CertificateVerifierReader(comptime Reader: type) type {
-    return CertificateReader(Sha256Reader(Reader));
+    return CertificateReader(HashingReader(Reader));
 }
 
-pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reader: type, comptime Writer: type) type {
+pub fn ClientConnectError(
+    comptime verifier: CertificateVerifier,
+    comptime Reader: type,
+    comptime Writer: type,
+    comptime has_client_certs: bool,
+) type {
     const Additional = error{
         ServerInvalidVersion,
         ServerMalformedResponse,
@@ -227,7 +251,7 @@ pub fn ClientConnectError(comptime verifier: CertificateVerifier, comptime Reade
         .function => |f| @typeInfo(@typeInfo(@TypeOf(f)).Fn.return_type orelse
             @compileError(err_msg)).ErrorUnion.error_set || error{CertificateVerificationFailed},
         .default => error{CertificateVerificationFailed},
-    };
+    } || (if (has_client_certs) error{ClientCertificateVerifyFailed} else error{});
 }
 
 // See http://howardhinnant.github.io/date_algorithms.html
@@ -414,6 +438,7 @@ fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, read
 fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, reader: anytype) !void {
     const is_ca = state.list.items.len != 0;
 
+    // TODO: Some way to get tag + length buffer directly in the capture callback?
     const encoded_length = asn1.der.encode_length(length).slice();
     // This is not errdefered since default_cert_verifier call takes care of cleaning up all the certificate data.
     // Same for the signature.data
@@ -470,38 +495,8 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
 }
 
 fn set_signature_algorithm(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
-    const oid_tag = try reader.readByte();
-    if (oid_tag != 0x06)
-        return error.CertificateVerificationFailed;
-
-    const oid_length = try asn1.der.parse_length(reader);
-    if (oid_length == 9) {
-        var oid_bytes: [9]u8 = undefined;
-        try reader.readNoEof(&oid_bytes);
-
-        const cert = &state.list.items[state.list.items.len - 1];
-        if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01 })) {
-            cert.signature_algorithm = .rsa;
-        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x04 })) {
-            cert.signature_algorithm = .rsa_md5;
-        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05 })) {
-            cert.signature_algorithm = .rsa_sha1;
-        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B })) {
-            cert.signature_algorithm = .rsa_sha256;
-        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C })) {
-            cert.signature_algorithm = .rsa_sha384;
-        } else if (mem.eql(u8, &oid_bytes, &[_]u8{ 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D })) {
-            cert.signature_algorithm = .rsa_sha512;
-        } else {
-            return error.CertificateVerificationFailed;
-        }
-        return;
-    } else if (oid_length == 10) {
-        // @TODO
-        // ECDSA + <Hash> algorithms
-    }
-
-    return error.CertificateVerificationFailed;
+    const cert = &state.list.items[state.list.items.len - 1];
+    cert.signature_algorithm = (try x509.get_signature_algorithm(reader)) orelse return error.CertificateVerificationFailed;
 }
 
 fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
@@ -516,155 +511,6 @@ fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, rea
     };
 }
 
-fn verify_signature(
-    allocator: *Allocator,
-    signature_algorithm: SignatureAlgorithm,
-    signature: asn1.BitString,
-    hash: []const u8,
-    public_key: x509.PublicKey,
-) !bool {
-    // @TODO ECDSA algorithms
-    if (public_key != .rsa) return false;
-    const prefix: []const u8 = switch (signature_algorithm) {
-        // Deprecated hash algos
-        .rsa_md5, .rsa_sha1 => return false,
-        // @TODO How does this one work?
-        .rsa => return false,
-        .rsa_sha256 => &[_]u8{
-            0x30, 0x31, 0x30, 0x0d, 0x06,
-            0x09, 0x60, 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x01,
-            0x05, 0x00, 0x04, 0x20,
-        },
-        .rsa_sha384 => &[_]u8{
-            0x30, 0x41, 0x30, 0x0d, 0x06,
-            0x09, 0x60, 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x02,
-            0x05, 0x00, 0x04, 0x30,
-        },
-        .rsa_sha512 => &[_]u8{
-            0x30, 0x51, 0x30, 0x0d, 0x06,
-            0x09, 0x60, 0x86, 0x48, 0x01,
-            0x65, 0x03, 0x04, 0x02, 0x03,
-            0x05, 0x00, 0x04, 0x40,
-        },
-    };
-
-    // RSA hash verification with PKCS 1 V1_5 padding
-    const modulus = std.math.big.int.Const{ .limbs = public_key.rsa.modulus, .positive = true };
-    const exponent = std.math.big.int.Const{ .limbs = public_key.rsa.exponent, .positive = true };
-    if (modulus.bitCountAbs() != signature.bit_len)
-        return false;
-
-    // encrypt the signature using the RSA key
-    // @TODO better algorithm, this is probably slow as hell
-    var encrypted_signature = try std.math.big.int.Managed.initSet(allocator, @as(usize, 1));
-    defer encrypted_signature.deinit();
-
-    {
-        var curr_exponent = try exponent.toManaged(allocator);
-        defer curr_exponent.deinit();
-
-        const curr_base_limbs = try allocator.alloc(
-            usize,
-            std.math.divCeil(usize, signature.data.len, @sizeOf(usize)) catch unreachable,
-        );
-        const curr_base_limb_bytes = @ptrCast([*]u8, curr_base_limbs)[0..signature.data.len];
-        mem.copy(u8, curr_base_limb_bytes, signature.data);
-        mem.reverse(u8, curr_base_limb_bytes);
-        var curr_base = (std.math.big.int.Mutable{
-            .limbs = curr_base_limbs,
-            .positive = true,
-            .len = curr_base_limbs.len,
-        }).toManaged(allocator);
-        defer curr_base.deinit();
-
-        // encrypted = signature ^ key.exponent MOD key.modulus
-        while (curr_exponent.toConst().orderAgainstScalar(0) == .gt) {
-            if (curr_exponent.isOdd()) {
-                try encrypted_signature.ensureMulCapacity(encrypted_signature.toConst(), curr_base.toConst());
-                try encrypted_signature.mul(encrypted_signature.toConst(), curr_base.toConst());
-                try llmod(&encrypted_signature, modulus);
-            }
-            try curr_base.sqr(curr_base.toConst());
-            try llmod(&curr_base, modulus);
-            try curr_exponent.shiftRight(curr_exponent, 1);
-        }
-    }
-    // EMSA-PKCS1-V1_5-ENCODE
-    if (encrypted_signature.limbs.len * @sizeOf(usize) < signature.data.len)
-        return false;
-
-    const enc_buf = @ptrCast([*]u8, encrypted_signature.limbs.ptr)[0..signature.data.len];
-    mem.reverse(u8, enc_buf);
-
-    if (enc_buf[0] != 0x00 or enc_buf[1] != 0x01)
-        return false;
-    if (!mem.endsWith(u8, enc_buf, hash))
-        return false;
-    if (!mem.endsWith(u8, enc_buf[0 .. enc_buf.len - hash.len], prefix))
-        return false;
-    if (enc_buf[enc_buf.len - hash.len - prefix.len - 1] != 0x00)
-        return false;
-    for (enc_buf[2 .. enc_buf.len - hash.len - prefix.len - 1]) |c| {
-        if (c != 0xff) return false;
-    }
-
-    return true;
-}
-
-fn certificate_verify_signature(
-    allocator: *Allocator,
-    signature_algorithm: SignatureAlgorithm,
-    signature: asn1.BitString,
-    bytes: []const u8,
-    public_key: x509.PublicKey,
-) !bool {
-    // @TODO ECDSA algorithms
-    if (public_key != .rsa) return false;
-
-    var hash_buf: [64]u8 = undefined;
-    var hash: []u8 = undefined;
-
-    switch (signature_algorithm) {
-        // Deprecated hash algos
-        .rsa_md5, .rsa_sha1 => return false,
-        // @TODO How does this one work?
-        .rsa => return false,
-
-        .rsa_sha256 => {
-            Sha256.hash(bytes, hash_buf[0..32], .{});
-            hash = hash_buf[0..32];
-        },
-        .rsa_sha384 => {
-            Sha384.hash(bytes, hash_buf[0..48], .{});
-            hash = hash_buf[0..48];
-        },
-        .rsa_sha512 => {
-            Sha512.hash(bytes, hash_buf[0..64], .{});
-            hash = &hash_buf;
-        },
-    }
-    return try verify_signature(allocator, signature_algorithm, signature, hash, public_key);
-}
-
-// res = res mod N
-fn llmod(res: *std.math.big.int.Managed, n: std.math.big.int.Const) !void {
-    var temp = try std.math.big.int.Managed.init(res.allocator);
-    defer temp.deinit();
-    try temp.divTrunc(res, res.toConst(), n);
-}
-
-const SignatureAlgorithm = enum {
-    rsa,
-    rsa_md5,
-    rsa_sha1,
-    rsa_sha256,
-    rsa_sha384,
-    rsa_sha512,
-    // @TODO ECDSA versions
-};
-
 const ServerCertificate = struct {
     bytes: []const u8,
     dn: []const u8,
@@ -672,19 +518,19 @@ const ServerCertificate = struct {
     raw_subject_alternative_name: []const u8,
     public_key: x509.PublicKey,
     signature: asn1.BitString,
-    signature_algorithm: SignatureAlgorithm,
+    signature_algorithm: x509.Certificate.SignatureAlgorithm,
     is_ca: bool,
 
     const GeneralName = enum(u5) {
-        otherName = 0,
-        rfc822Name = 1,
-        dNSName = 2,
-        x400Address = 3,
-        directoryName = 4,
-        ediPartyName = 5,
-        uniformResourceIdentifier = 6,
-        iPAddress = 7,
-        registeredID = 8,
+        other_name = 0,
+        rfc822_name = 1,
+        dns_name = 2,
+        x400_address = 3,
+        directory_name = 4,
+        edi_party_name = 5,
+        uniform_resource_identifier = 6,
+        ip_address = 7,
+        registered_id = 8,
     };
 
     fn iterSAN(self: ServerCertificate, choice: GeneralName) NameIterator {
@@ -772,7 +618,7 @@ pub fn default_cert_verifier(
     allocator: *mem.Allocator,
     reader: anytype,
     certs_bytes: usize,
-    trusted_certificates: []const x509.TrustAnchor,
+    trusted_certificates: []const x509.Certificate,
     hostname: []const u8,
 ) !x509.PublicKey {
     var capture_state = VerifierCaptureState{
@@ -831,7 +677,7 @@ pub fn default_cert_verifier(
             break :name_matched;
         }
 
-        var iter = chain[0].iterSAN(.dNSName);
+        var iter = chain[0].iterSAN(.dns_name);
         while (iter.next()) |cert_name| {
             if (cert_name_matches(cert_name, hostname)) {
                 break :name_matched;
@@ -843,7 +689,7 @@ pub fn default_cert_verifier(
 
     var i: usize = 0;
     while (i < chain.len - 1) : (i += 1) {
-        if (!try certificate_verify_signature(
+        if (!try @"pcks1v1.5".certificate_verify_signature(
             allocator,
             chain[i].signature_algorithm,
             chain[i].signature,
@@ -868,7 +714,7 @@ pub fn default_cert_verifier(
             if (!trusted.is_ca)
                 continue;
 
-            if (try certificate_verify_signature(
+            if (try @"pcks1v1.5".certificate_verify_signature(
                 allocator,
                 cert.signature_algorithm,
                 cert.signature,
@@ -1101,6 +947,7 @@ pub fn client_connect(
     options.cert_verifier,
     @TypeOf(options.reader),
     @TypeOf(options.writer),
+    @hasField(@TypeOf(options), "client_certificates"),
 )!Client(
     @TypeOf(options.reader),
     @TypeOf(options.writer),
@@ -1137,11 +984,16 @@ pub fn client_connect(
         @compileError("Must provide at least one curve type.");
 
     const has_alpn = comptime @hasField(Options, "protocols");
-    var handshake_record_hash = Sha256.init(.{});
+    var handshake_record_hash_set = HashSet{
+        .sha224 = Sha224.init(.{}),
+        .sha256 = Sha256.init(.{}),
+        .sha384 = Sha384.init(.{}),
+        .sha512 = Sha512.init(.{}),
+    };
     const reader = options.reader;
     const writer = options.writer;
-    const hashing_reader = sha256_reader(&handshake_record_hash, reader);
-    const hashing_writer = sha256_writer(&handshake_record_hash, writer);
+    const hashing_reader = make_hashing_reader(&handshake_record_hash_set, reader);
+    const hashing_writer = make_hashing_writer(&handshake_record_hash_set, writer);
 
     var client_random: [32]u8 = undefined;
     const rand = if (!@hasField(Options, "rand"))
@@ -1441,19 +1293,19 @@ pub fn client_connect(
 
         var hash_buf: [64]u8 = undefined;
         var hash: []const u8 = undefined;
-        const signature_algoritm: SignatureAlgorithm = switch (signature_id) {
+        const signature_algoritm: x509.Certificate.SignatureAlgorithm = switch (signature_id) {
+            // TODO: More
             // RSA/PKCS1/SHA256
             0x0401 => block: {
                 var sha256 = Sha256.init(.{});
                 sha256.update(&client_random);
                 sha256.update(&server_random);
                 sha256.update(&curve_id_buf);
-                // @TODO Should this always be \x20 instead?
                 sha256.update(&[1]u8{pub_key_len});
                 sha256.update(server_public_key_buf[0..pub_key_len]);
                 sha256.final(hash_buf[0..32]);
                 hash = hash_buf[0..32];
-                break :block .rsa_sha256;
+                break :block .{ .signature = .rsa, .hash = .sha256 };
             },
             // RSA/PKCS1/SHA512
             0x0601 => block: {
@@ -1465,7 +1317,7 @@ pub fn client_connect(
                 sha512.update(server_public_key_buf[0..pub_key_len]);
                 sha512.final(hash_buf[0..64]);
                 hash = hash_buf[0..64];
-                break :block .rsa_sha512;
+                break :block .{ .signature = .rsa, .hash = .sha512 };
             },
             else => return error.ServerInvalidSignatureAlgorithm,
         };
@@ -1473,7 +1325,7 @@ pub fn client_connect(
         defer options.temp_allocator.free(signature_bytes);
         try hashing_reader.readNoEof(signature_bytes);
 
-        if (!try verify_signature(
+        if (!try @"pcks1v1.5".verify_signature(
             options.temp_allocator,
             signature_algoritm,
             .{ .data = signature_bytes, .bit_len = signature_len * 8 },
@@ -1485,12 +1337,120 @@ pub fn client_connect(
         certificate_public_key.deinit(options.temp_allocator);
         certificate_public_key = x509.PublicKey.empty;
     }
-    // Read server hello done
+    var client_certificate: ?*const x509.ClientCertificateChain = null;
     {
         const length = try handshake_record_length(reader);
-        const is_bytes = try hashing_reader.isBytes("\x0e\x00\x00\x00");
-        if (length != 4 or !is_bytes)
-            return error.ServerMalformedResponse;
+        const record_type = try hashing_reader.readByte();
+        if (record_type == 14) {
+            // Server hello done
+            const is_bytes = try hashing_reader.isBytes("\x00\x00\x00");
+            if (length != 4 or !is_bytes)
+                return error.ServerMalformedResponse;
+        } else if (record_type == 13) {
+            // Certificate request
+            const certificate_request_bytes = try hashing_reader.readIntBig(u24);
+            if (length != certificate_request_bytes + 8)
+                return error.ServerMalformedResponse;
+            // TODO: For now, we are ignoring the certificate types, as they have been somewhat
+            // superceded by the supported_signature_algorithms field
+            const certificate_types_bytes = try hashing_reader.readByte();
+            try hashing_reader.skipBytes(certificate_types_bytes, .{});
+
+            var chosen_client_certificates = std.ArrayListUnmanaged(*const x509.ClientCertificateChain){};
+            defer chosen_client_certificates.deinit(options.temp_allocator);
+
+            const signature_algorithms_bytes = try hashing_reader.readIntBig(u16);
+            if (@hasField(Options, "client_certificates")) {
+                var i: usize = 0;
+                while (i < signature_algorithms_bytes / 2) : (i += 1) {
+                    var signature_algorithm: [2]u8 = undefined;
+                    try hashing_reader.readNoEof(&signature_algorithm);
+                    for (options.client_certificates) |*cert_chain| {
+                        if (@enumToInt(cert_chain.signature_algorithm.hash) == signature_algorithm[0] and
+                            @enumToInt(cert_chain.signature_algorithm.signature) == signature_algorithm[1])
+                        {
+                            try chosen_client_certificates.append(options.temp_allocator, cert_chain);
+                        }
+                    }
+                }
+            } else {
+                try hashing_reader.skipBytes(signature_algorithms_bytes, .{});
+            }
+
+            const certificate_authorities_bytes = try hashing_reader.readIntBig(u16);
+            if (chosen_client_certificates.items.len == 0) {
+                try hashing_reader.skipBytes(certificate_authorities_bytes, .{});
+            } else {
+                const dns_buf = try options.temp_allocator.alloc(u8, certificate_authorities_bytes);
+                defer options.temp_allocator.free(dns_buf);
+
+                try hashing_reader.readNoEof(dns_buf);
+                var fbs = std.io.fixedBufferStream(dns_buf[2..]);
+                var fbs_reader = fbs.reader();
+
+                while (fbs.pos < fbs.buffer.len) {
+                    const start_idx = fbs.pos;
+                    const seq_tag = fbs_reader.readByte() catch return error.ServerMalformedResponse;
+                    if (seq_tag != 0x30)
+                        return error.ServerMalformedResponse;
+
+                    const seq_length = asn1.der.parse_length(fbs_reader) catch return error.ServerMalformedResponse;
+                    fbs_reader.skipBytes(seq_length, .{}) catch return error.ServerMalformedResponse;
+
+                    var i: usize = 0;
+                    while (i < chosen_client_certificates.items.len) {
+                        const cert = chosen_client_certificates.items[i];
+                        var cert_idx: usize = 0;
+                        while (cert_idx < cert.cert_len) : (cert_idx += 1) {
+                            if (mem.eql(u8, cert.cert_issuer_dns[cert_idx], fbs.buffer[start_idx..fbs.pos]))
+                                break;
+                        } else {
+                            _ = chosen_client_certificates.swapRemove(i);
+                            continue;
+                        }
+                        i += 1;
+                    }
+                }
+                if (fbs.pos != fbs.buffer.len)
+                    return error.ServerMalformedResponse;
+            }
+            // Server hello done
+            // @TODO Will this always be in the same record as the certificate request?
+            const hello_record_type = try hashing_reader.readByte();
+            if (hello_record_type != 14)
+                return error.ServerMalformedResponse;
+            const is_bytes = try hashing_reader.isBytes("\x00\x00\x00");
+            if (!is_bytes)
+                return error.ServerMalformedResponse;
+
+            // Send the client certificate message
+            try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
+            if (chosen_client_certificates.items.len != 0) {
+                client_certificate = chosen_client_certificates.items[0];
+
+                const certificate_count = client_certificate.?.cert_len;
+                // 7 bytes for the record type tag (1), record length (3), certificate list length (3)
+                // 3 bytes for each certificate length
+                var total_len: u24 = 7 + 3 * @intCast(u24, certificate_count);
+                var i: usize = 0;
+                while (i < certificate_count) : (i += 1) {
+                    total_len += @intCast(u24, client_certificate.?.raw_certs[i].len);
+                }
+                try writer.writeIntBig(u16, @intCast(u16, total_len));
+                var msg_buf: [7]u8 = [1]u8{0x0b} ++ ([1]u8{undefined} ** 6);
+                mem.writeIntBig(u24, msg_buf[1..4], total_len - 4);
+                mem.writeIntBig(u24, msg_buf[4..7], total_len - 7);
+                try hashing_writer.writeAll(&msg_buf);
+                i = 0;
+                while (i < certificate_count) : (i += 1) {
+                    try hashing_writer.writeIntBig(u24, @intCast(u24, client_certificate.?.raw_certs[i].len));
+                    try hashing_writer.writeAll(client_certificate.?.raw_certs[i]);
+                }
+            } else {
+                try writer.writeIntBig(u16, 7);
+                try hashing_writer.writeAll(&[7]u8{ 0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00 });
+            }
+        } else return error.ServerMalformedResponse;
     }
 
     // Generate keys for the session
@@ -1511,6 +1471,53 @@ pub fn client_connect(
             }
             try hashing_writer.writeAll(&@field(client_key_pair, curve.name).public_key);
             break;
+        }
+    }
+
+    // If we have a client certificate, send a certificate verify message
+    if (@hasField(Options, "client_certificates")) {
+        if (client_certificate) |client_cert| {
+            var current_hash_buf: [64]u8 = undefined;
+            var current_hash: []const u8 = undefined;
+            const hash_algo = client_cert.signature_algorithm.hash;
+            // TODO: Making this a switch statement kills stage1
+            if (hash_algo == .none or hash_algo == .md5 or hash_algo == .sha1)
+                return error.ClientCertificateVerifyFailed
+            else if (hash_algo == .sha224) {
+                var hash_copy = handshake_record_hash_set.sha224;
+                hash_copy.final(current_hash_buf[0..28]);
+                current_hash = current_hash_buf[0..28];
+            } else if (hash_algo == .sha256) {
+                var hash_copy = handshake_record_hash_set.sha256;
+                hash_copy.final(current_hash_buf[0..32]);
+                current_hash = current_hash_buf[0..32];
+            } else if (hash_algo == .sha384) {
+                var hash_copy = handshake_record_hash_set.sha384;
+                hash_copy.final(current_hash_buf[0..48]);
+                current_hash = current_hash_buf[0..48];
+            } else {
+                var hash_copy = handshake_record_hash_set.sha512;
+                hash_copy.final(&current_hash_buf);
+                current_hash = &current_hash_buf;
+            }
+
+            const signed = (try @"pcks1v1.5".sign(
+                options.temp_allocator,
+                client_cert.signature_algorithm,
+                current_hash,
+                client_cert.private_key,
+            )) orelse return error.ClientCertificateVerifyFailed;
+            defer options.temp_allocator.free(signed);
+
+            try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
+            try writer.writeIntBig(u16, @intCast(u16, signed.len + 8));
+            var msg_buf: [8]u8 = [1]u8{0x0F} ++ ([1]u8{undefined} ** 7);
+            mem.writeIntBig(u24, msg_buf[1..4], @intCast(u24, signed.len + 4));
+            msg_buf[4] = @enumToInt(client_cert.signature_algorithm.hash);
+            msg_buf[5] = @enumToInt(client_cert.signature_algorithm.signature);
+            mem.writeIntBig(u16, msg_buf[6..8], @intCast(u16, signed.len));
+            try hashing_writer.writeAll(&msg_buf);
+            try hashing_writer.writeAll(signed);
         }
     }
 
@@ -1611,7 +1618,7 @@ pub fn client_connect(
             seed[0..15].* = "client finished".*;
             // We still need to update the hash one time, so we copy
             // to get the current digest here.
-            var hash_copy = handshake_record_hash;
+            var hash_copy = handshake_record_hash_set.sha256;
             hash_copy.final(seed[15..47]);
 
             var a1: [32 + seed.len]u8 = undefined;
@@ -1621,7 +1628,7 @@ pub fn client_connect(
             Hmac256.create(&p1, &a1, &master_secret);
             verify_message[4..16].* = p1[0..12].*;
         }
-        handshake_record_hash.update(&verify_message);
+        handshake_record_hash_set.update(&verify_message);
 
         inline for (suites) |cs| {
             if (cs.tag == ciphersuite) {
@@ -1654,7 +1661,7 @@ pub fn client_connect(
         {
             var seed: [47]u8 = undefined;
             seed[0..15].* = "server finished".*;
-            handshake_record_hash.final(seed[15..47]);
+            handshake_record_hash_set.sha256.final(seed[15..47]);
             var a1: [32 + seed.len]u8 = undefined;
             Hmac256.create(a1[0..32], &seed, &master_secret);
             a1[32..].* = seed;
@@ -1779,7 +1786,7 @@ test "HTTPS request on wikipedia main page" {
     defer sock.close();
 
     var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertHighAssuranceEVRootCA.crt.pem"));
-    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
@@ -1838,7 +1845,7 @@ test "HTTPS request on wikipedia alternate name" {
     defer sock.close();
 
     var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertHighAssuranceEVRootCA.crt.pem"));
-    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
@@ -1911,7 +1918,7 @@ test "Connecting to expired.badssl.com returns an error" {
     defer sock.close();
 
     var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
-    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
@@ -1936,7 +1943,7 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     defer sock.close();
 
     var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
-    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
@@ -1961,7 +1968,7 @@ test "Connecting to self-signed.badssl.com returns an error" {
     defer sock.close();
 
     var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
-    var trusted_chain = try x509.TrustAnchorChain.from_pem(std.testing.allocator, fbs.reader());
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
@@ -1979,4 +1986,43 @@ test "Connecting to self-signed.badssl.com returns an error" {
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
     }, "self-signed.badssl.com"));
+}
+
+test "Connecting to client.badssl.com with a client certificate" {
+    const sock = try std.net.tcpConnectToHost(std.testing.allocator, "client.badssl.com", 443);
+    defer sock.close();
+
+    var fbs = std.io.fixedBufferStream(@embedFile("../test/DigiCertGlobalRootCA.crt.pem"));
+    var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
+    defer trusted_chain.deinit();
+
+    // @TODO Remove this once std.crypto.rand works in .evented mode
+    var rand = blk: {
+        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
+        try std.os.getrandom(&seed);
+        break :blk &std.rand.DefaultCsprng.init(seed).random;
+    };
+
+    var client_cert = try x509.ClientCertificateChain.from_pem(
+        std.testing.allocator,
+        std.io.fixedBufferStream(@embedFile("../test/badssl.com-client.pem")).reader(),
+    );
+    defer client_cert.deinit(std.testing.allocator);
+
+    var client = try client_connect(.{
+        .rand = rand,
+        .reader = sock.reader(),
+        .writer = sock.writer(),
+        .cert_verifier = .default,
+        .temp_allocator = std.testing.allocator,
+        .trusted_certificates = trusted_chain.data.items,
+        .client_certificates = &[1]x509.ClientCertificateChain{client_cert},
+    }, "client.badssl.com");
+    defer client.close_notify() catch {};
+
+    try client.writer().writeAll("GET / HTTP/1.1\r\nHost: client.badssl.com\r\nAccept: */*\r\n\r\n");
+
+    const line = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
+    defer std.testing.allocator.free(line);
+    std.testing.expectEqualStrings("HTTP/1.1 200 OK\r", line);
 }
