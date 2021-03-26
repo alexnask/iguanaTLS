@@ -1,6 +1,6 @@
 pkgs:
   iguanaTLS:
-    version: 0.0.0
+    version: 0.0.1
     author: alexnask
     description: "Minimal, experimental TLS 1.2 implementation in Zig"
     license: MIT
@@ -11,4 +11,5 @@ pkgs:
       README.md
       LICENSE
       src/*.zig
+      bench/*.zig
       test/*
