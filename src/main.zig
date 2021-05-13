@@ -1809,12 +1809,12 @@ test "HTTPS request on wikipedia main page" {
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
 
-    std.testing.expectEqualStrings("http/1.1", client.protocol);
+    try std.testing.expectEqualStrings("http/1.1", client.protocol);
     try client.writer().writeAll("GET /wiki/Main_Page HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-        std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.spaces));
+        try std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.spaces));
         std.testing.allocator.free(header);
     }
 
@@ -1833,7 +1833,7 @@ test "HTTPS request on wikipedia main page" {
             content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
         }
     }
-    std.testing.expect(content_length != null);
+    try std.testing.expect(content_length != null);
     const html_contents = try std.testing.allocator.alloc(u8, content_length.?);
     defer std.testing.allocator.free(html_contents);
 
@@ -1888,7 +1888,7 @@ test "HTTPS request on twitch oath2 endpoint" {
         .cert_verifier = .none,
         .protocols = &[_][]const u8{"http/1.1"},
     }, "id.twitch.tv");
-    std.testing.expectEqualStrings("http/1.1", client.protocol);
+    try std.testing.expectEqualStrings("http/1.1", client.protocol);
     defer client.close_notify() catch {};
 
     try client.writer().writeAll("GET /oauth2/validate HTTP/1.1\r\nHost: id.twitch.tv\r\nAccept: */*\r\n\r\n");
@@ -1906,7 +1906,7 @@ test "HTTPS request on twitch oath2 endpoint" {
             content_length = try std.fmt.parseUnsigned(usize, hdr_contents[16..], 10);
         }
     }
-    std.testing.expect(content_length != null);
+    try std.testing.expect(content_length != null);
     const html_contents = try std.testing.allocator.alloc(u8, content_length.?);
     defer std.testing.allocator.free(html_contents);
 
@@ -1928,7 +1928,7 @@ test "Connecting to expired.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
@@ -1953,7 +1953,7 @@ test "Connecting to wrong.host.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
@@ -1978,7 +1978,7 @@ test "Connecting to self-signed.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
@@ -2024,5 +2024,5 @@ test "Connecting to client.badssl.com with a client certificate" {
 
     const line = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
     defer std.testing.allocator.free(line);
-    std.testing.expectEqualStrings("HTTP/1.1 200 OK\r", line);
+    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r", line);
 }

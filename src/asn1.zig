@@ -422,7 +422,7 @@ pub const der = struct {
         return try parse_int_with_length_internal(alloc, &read, length, der_reader);
     }
 
-    fn parse_int_with_length_internal(alloc: *Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt  {
+    fn parse_int_with_length_internal(alloc: *Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
         const first_byte = try der_reader.readByte();
         if (first_byte == 0x0 and length > 1) {
             // Positive number with highest bit set to 1 in the rest.

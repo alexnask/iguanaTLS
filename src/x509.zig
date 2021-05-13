@@ -885,12 +885,12 @@ fn expected_pem_certificate_chain(bytes: []const u8, certs: []const []const u8) 
     while (try it.next()) |cert_reader| : (idx += 1) {
         const result_bytes = try cert_reader.readAllAlloc(std.testing.allocator, std.math.maxInt(usize));
         defer std.testing.allocator.free(result_bytes);
-        std.testing.expectEqualSlices(u8, certs[idx], result_bytes);
+        try std.testing.expectEqualSlices(u8, certs[idx], result_bytes);
     }
     if (idx != certs.len) {
         std.debug.panic("Read {} certificates, wanted {}", .{ idx, certs.len });
     }
-    std.testing.expect((try it.next()) == null);
+    try std.testing.expect((try it.next()) == null);
 }
 
 fn expected_pem_certificate(bytes: []const u8, cert_bytes: []const u8) !void {
@@ -935,8 +935,8 @@ test "pemCertificateIterator" {
             const first_reader = (try it.next()) orelse return error.NoCertificate;
             var first_few: [8]u8 = undefined;
             const bytes = try first_reader.readAll(&first_few);
-            std.testing.expectEqual(first_few.len, bytes);
-            std.testing.expectEqualSlices(u8, github_der[0..bytes], &first_few);
+            try std.testing.expectEqual(first_few.len, bytes);
+            try std.testing.expectEqualSlices(u8, github_der[0..bytes], &first_few);
         }
 
         const next_reader = (try it.next()) orelse return error.NoCertificate;
@@ -950,8 +950,8 @@ test "pemCertificateIterator" {
                 std.debug.panic("index {}: expected 0x{X}, found 0x{X}", .{ idx, github_der[idx], byte });
             }
         }
-        std.testing.expectEqual(github_der.len, idx);
-        std.testing.expect((try it.next()) == null);
+        try std.testing.expectEqual(github_der.len, idx);
+        try std.testing.expect((try it.next()) == null);
     }
 }
 

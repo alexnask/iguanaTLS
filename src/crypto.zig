@@ -947,13 +947,13 @@ test "elliptic curve functions with secp384r1 curve" {
         var res: u32 = ecc.decode_to_jacobian(ecc.SECP384R1, &P, ecc.SECP384R1.base_point);
         var out: [96]u8 = undefined;
         ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
-        std.testing.expectEqual(ecc.SECP384R1.base_point, out);
+        try std.testing.expectEqual(ecc.SECP384R1.base_point, out);
 
         // Multiply by one, check that the result is still the base point
         mem.set(u8, &out, 0);
         ecc.point_mul(ecc.SECP384R1, &P, &[1]u8{1});
         ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
-        std.testing.expectEqual(ecc.SECP384R1.base_point, out);
+        try std.testing.expectEqual(ecc.SECP384R1.base_point, out);
     }
 
     {
@@ -973,7 +973,7 @@ test "elliptic curve functions with secp384r1 curve" {
 
         const shared1 = try ecc.scalarmult(ecc.SECP384R1, kp1.public_key, &kp2.secret_key);
         const shared2 = try ecc.scalarmult(ecc.SECP384R1, kp2.public_key, &kp1.secret_key);
-        std.testing.expectEqual(shared1, shared2);
+        try std.testing.expectEqual(shared1, shared2);
     }
 
     // @TODO Add tests with known points.

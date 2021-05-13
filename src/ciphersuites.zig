@@ -151,7 +151,7 @@ pub const suites = struct {
                             error.EndOfStream => return error.ServerMalformedResponse,
                             else => |e| return e,
                         };
-                        var result: [2] u8 = undefined;
+                        var result: [2]u8 = undefined;
                         ChaCha20Stream.chacha20Xor(
                             &result,
                             &encrypted,
