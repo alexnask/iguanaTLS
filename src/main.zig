@@ -1349,8 +1349,10 @@ pub fn client_connect(
         } else if (record_type == 13) {
             // Certificate request
             const certificate_request_bytes = try hashing_reader.readIntBig(u24);
-            if (length != certificate_request_bytes + 8)
-                return error.ServerMalformedResponse;
+            const hello_done_in_same_record =
+                if (length == certificate_request_bytes + 8) true
+                else if (length != certificate_request_bytes) false
+                else return error.ServerMalformedResponse;
             // TODO: For now, we are ignoring the certificate types, as they have been somewhat
             // superceded by the supported_signature_algorithms field
             const certificate_types_bytes = try hashing_reader.readByte();
@@ -1415,7 +1417,11 @@ pub fn client_connect(
                     return error.ServerMalformedResponse;
             }
             // Server hello done
-            // @TODO Will this always be in the same record as the certificate request?
+            if (!hello_done_in_same_record) {
+                const hello_done_record_len = try handshake_record_length(reader);
+                if (hello_done_record_len != 4)
+                    return error.ServerMalformedResponse;
+            }
             const hello_record_type = try hashing_reader.readByte();
             if (hello_record_type != 14)
                 return error.ServerMalformedResponse;
