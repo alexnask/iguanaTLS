@@ -1354,9 +1354,12 @@ pub fn client_connect(
             // Certificate request
             const certificate_request_bytes = try hashing_reader.readIntBig(u24);
             const hello_done_in_same_record =
-                if (length == certificate_request_bytes + 8) true
-                else if (length != certificate_request_bytes) false
-                else return error.ServerMalformedResponse;
+                if (length == certificate_request_bytes + 8)
+                true
+            else if (length != certificate_request_bytes)
+                false
+            else
+                return error.ServerMalformedResponse;
             // TODO: For now, we are ignoring the certificate types, as they have been somewhat
             // superceded by the supported_signature_algorithms field
             const certificate_types_bytes = try hashing_reader.readByte();
