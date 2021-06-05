@@ -7,18 +7,16 @@ const Poly1305 = std.crypto.onetimeauth.Poly1305;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
 const main = @import("main.zig");
-const alert_byte_to_error = main.alert_byte_to_error;
-const record_header = main.record_header;
+const RecordHeader = main.RecordHeader;
 
-// @TODO Make the `read` state machine generic, only specialize on the state each
-//   suite needs to keep between records and how it is updated + the final mac
-//   verification
 pub const suites = struct {
     pub const ECDHE_RSA_Chacha20_Poly1305 = struct {
         pub const name = "ECDHE-RSA-CHACHA20-POLY1305";
         pub const tag = 0xCCA8;
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
+        pub const prefix_data_length = 0;
+        pub const mac_length = 16;
 
         pub const Keys = struct {
             client_key: [32]u8,
@@ -27,18 +25,68 @@ pub const suites = struct {
             server_iv: [12]u8,
         };
 
-        pub const State = union(enum) {
-            none,
-            in_record: struct {
-                len: usize,
-                left: usize,
-                mac: Poly1305,
-                context: ChaCha20Stream.BlockVec,
-                idx: usize,
-                buf: [64]u8,
-            },
+        pub const State = struct {
+            mac: Poly1305,
+            context: ChaCha20Stream.BlockVec,
+            buf: [64]u8,
         };
-        pub const default_state: State = .none;
+
+        pub fn init_state(_: [0]u8, server_seq: u64, key_data: anytype, header: RecordHeader) State {
+            const len = header.len() - 16;
+            var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
+            mem.writeIntBig(u64, nonce[4..12], server_seq);
+            for (nonce) |*n, i| {
+                n.* ^= key_data.server_iv(@This())[i];
+            }
+
+            var additional_data: [13]u8 = undefined;
+            mem.writeIntBig(u64, additional_data[0..8], server_seq);
+            additional_data[8..11].* = header.data[0..3].*;
+            mem.writeIntBig(u16, additional_data[11..13], len);
+
+            var c: [4]u32 = undefined;
+            c[0] = 1;
+            c[1] = mem.readIntLittle(u32, nonce[0..4]);
+            c[2] = mem.readIntLittle(u32, nonce[4..8]);
+            c[3] = mem.readIntLittle(u32, nonce[8..12]);
+            const server_key = keyToWords(key_data.server_key(@This()).*);
+
+            return .{
+                .mac = ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
+                .context = ChaCha20Stream.initContext(server_key, c),
+                .buf = undefined,
+            };
+        }
+
+        pub fn decrypt_part(
+            key_data: anytype,
+            record_length: usize,
+            idx: *usize,
+            state: *State,
+            encrypted: []const u8,
+            out: []u8,
+        ) void {
+            std.debug.assert(encrypted.len == out.len);
+            ChaCha20Stream.chacha20Xor(
+                out,
+                encrypted,
+                keyToWords(key_data.server_key(@This()).*),
+                &state.context,
+                idx,
+                &state.buf,
+            );
+
+            state.mac.update(encrypted);
+        }
+
+        pub fn verify_mac(reader: anytype, record_length: usize, state: *State) !void {
+            var poly1305_tag: [16]u8 = undefined;
+            reader.readNoEof(&poly1305_tag) catch |err| switch (err) {
+                error.EndOfStream => return error.ServerMalformedResponse,
+                else => |e| return e,
+            };
+            try ChaCha20Stream.checkPoly1305(&state.mac, record_length, poly1305_tag);
+        }
 
         pub fn raw_write(
             comptime buffer_size: usize,
@@ -104,159 +152,6 @@ pub const suites = struct {
 
             return mem.eql(u8, &decrypted, &verify_message);
         }
-
-        pub fn read(
-            comptime buf_size: usize,
-            state: *State,
-            key_data: anytype,
-            reader: anytype,
-            server_seq: *u64,
-            buffer: []u8,
-        ) !usize {
-            switch (state.*) {
-                .none => {
-                    const header = record_header(reader) catch |err| switch (err) {
-                        error.EndOfStream => return 0,
-                        else => |e| return e,
-                    };
-
-                    const record_length = header.len();
-                    if (record_length < 16)
-                        return error.ServerMalformedResponse;
-                    const len = record_length - 16;
-
-                    if ((header.tag() != 0x17 and header.tag() != 0x15) or
-                        (header.tag() == 0x15 and len != 2))
-                    {
-                        return error.ServerMalformedResponse;
-                    }
-
-                    const curr_bytes = if (header.tag() == 0x15)
-                        2
-                    else
-                        std.math.min(std.math.min(len, buf_size), buffer.len);
-
-                    var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
-                    mem.writeIntBig(u64, nonce[4..12], server_seq.*);
-                    for (nonce) |*n, i| {
-                        n.* ^= key_data.server_iv(@This())[i];
-                    }
-
-                    var additional_data: [13]u8 = undefined;
-                    mem.writeIntBig(u64, additional_data[0..8], server_seq.*);
-                    additional_data[8..11].* = header.data[0..3].*;
-                    mem.writeIntBig(u16, additional_data[11..13], len);
-                    var mac = ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data);
-
-                    var c: [4]u32 = undefined;
-                    c[0] = 1;
-                    c[1] = mem.readIntLittle(u32, nonce[0..4]);
-                    c[2] = mem.readIntLittle(u32, nonce[4..8]);
-                    c[3] = mem.readIntLittle(u32, nonce[8..12]);
-                    const server_key = keyToWords(key_data.server_key(@This()).*);
-                    var context = ChaCha20Stream.initContext(server_key, c);
-                    var idx: usize = 0;
-                    var buf: [64]u8 = undefined;
-
-                    if (header.tag() == 0x15) {
-                        var encrypted: [2]u8 = undefined;
-                        reader.readNoEof(&encrypted) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-                        var result: [2]u8 = undefined;
-                        ChaCha20Stream.chacha20Xor(
-                            &result,
-                            &encrypted,
-                            server_key,
-                            &context,
-                            &idx,
-                            &buf,
-                        );
-
-                        // Finish computing the Poly1305 mac.
-                        var poly1305_tag: [16]u8 = undefined;
-                        reader.readNoEof(&poly1305_tag) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-                        mac.update(&encrypted);
-                        try ChaCha20Stream.checkPoly1305(&mac, 2, poly1305_tag);
-                        server_seq.* += 1;
-                        // CloseNotify
-                        if (result[1] == 0)
-                            return 0;
-                        return alert_byte_to_error(result[1]);
-                    } else if (header.tag() == 0x17) {
-                        // Partially decrypt the data.
-                        var encrypted: [buf_size]u8 = undefined;
-                        const actually_read = try reader.read(encrypted[0..curr_bytes]);
-
-                        ChaCha20Stream.chacha20Xor(
-                            buffer[0..actually_read],
-                            encrypted[0..actually_read],
-                            server_key,
-                            &context,
-                            &idx,
-                            &buf,
-                        );
-                        mac.update(encrypted[0..actually_read]);
-
-                        if (actually_read < len) {
-                            state.* = .{
-                                .in_record = .{
-                                    .mac = mac,
-                                    .len = len,
-                                    .left = len - actually_read,
-                                    .context = context,
-                                    .idx = idx,
-                                    .buf = buf,
-                                },
-                            };
-                        } else {
-                            // Finish computing the Poly1305 mac.
-                            var poly1305_tag: [16]u8 = undefined;
-                            reader.readNoEof(&poly1305_tag) catch |err| switch (err) {
-                                error.EndOfStream => return error.ServerMalformedResponse,
-                                else => |e| return e,
-                            };
-                            try ChaCha20Stream.checkPoly1305(&mac, len, poly1305_tag);
-                            server_seq.* += 1;
-                        }
-                        return actually_read;
-                    } else unreachable;
-                },
-                .in_record => |*record_info| {
-                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), record_info.left);
-                    // Partially decrypt the data.
-                    var encrypted: [buf_size]u8 = undefined;
-                    const actually_read = try reader.read(encrypted[0..curr_bytes]);
-                    ChaCha20Stream.chacha20Xor(
-                        buffer[0..actually_read],
-                        encrypted[0..actually_read],
-                        keyToWords(key_data.server_key(@This()).*),
-                        &record_info.context,
-                        &record_info.idx,
-                        &record_info.buf,
-                    );
-
-                    record_info.mac.update(encrypted[0..actually_read]);
-                    record_info.left -= actually_read;
-                    if (record_info.left == 0) {
-                        // Finish computing the Poly1305 mac.
-                        var poly1305_tag: [16]u8 = undefined;
-                        reader.readNoEof(&poly1305_tag) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-                        try ChaCha20Stream.checkPoly1305(&record_info.mac, record_info.len, poly1305_tag);
-                        server_seq.* += 1;
-                        state.* = .none;
-                    }
-                    return actually_read;
-                },
-            }
-        }
     };
 
     pub const ECDHE_RSA_AES128_GCM_SHA256 = struct {
@@ -264,6 +159,8 @@ pub const suites = struct {
         pub const tag = 0xC02F;
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
+        pub const prefix_data_length = 8;
+        pub const mac_length = 16;
 
         pub const Keys = struct {
             client_key: [16]u8,
@@ -273,17 +170,55 @@ pub const suites = struct {
         };
 
         const Aes = std.crypto.core.aes.Aes128;
-        pub const State = union(enum) {
-            none,
-            in_record: struct {
-                left: usize,
-                aes: @typeInfo(@TypeOf(Aes.initEnc)).Fn.return_type.?,
-                // ctr state
-                counterInt: u128,
-                idx: usize,
-            },
+        pub const State = struct {
+            aes: @typeInfo(@TypeOf(Aes.initEnc)).Fn.return_type.?,
+            counterInt: u128,
         };
-        pub const default_state: State = .none;
+
+        pub fn init_state(prefix_data: [8]u8, server_seq: u64, key_data: anytype, header: RecordHeader) State {
+            const len = header.len() - 16;
+            var iv: [12]u8 = undefined;
+            iv[0..4].* = key_data.server_iv(@This()).*;
+            iv[4..].* = prefix_data;
+
+            var j: [16]u8 = undefined;
+            mem.copy(u8, j[0..12], iv[0..]);
+            mem.writeIntBig(u32, j[12..][0..4], 2);
+
+            return .{
+                .aes = Aes.initEnc(key_data.server_key(@This()).*),
+                .counterInt = mem.readInt(u128, &j, .Big),
+            };
+        }
+
+        pub fn decrypt_part(
+            key_data: anytype,
+            record_length: usize,
+            idx: *usize,
+            state: *State,
+            encrypted: []const u8,
+            out: []u8,
+        ) void {
+            std.debug.assert(encrypted.len == out.len);
+
+            ctr(
+                @TypeOf(state.aes),
+                state.aes,
+                out,
+                encrypted,
+                &state.counterInt,
+                idx,
+                .Big,
+            );
+        }
+
+        pub fn verify_mac(reader: anytype, record_length: usize, state: *State) !void {
+            // @TODO Implement this
+            reader.skipBytes(16, .{}) catch |err| switch (err) {
+                error.EndOfStream => return error.ServerMalformedResponse,
+                else => |e| return e,
+            };
+        }
 
         pub fn check_verify_message(
             key_data: anytype,
@@ -351,146 +286,6 @@ pub const suites = struct {
             );
             try writer.writeAll(encrypted_data[0..buffer.len]);
             try writer.writeAll(&tag_data);
-        }
-
-        pub fn read(
-            comptime buf_size: usize,
-            state: *State,
-            key_data: anytype,
-            reader: anytype,
-            server_seq: *u64,
-            buffer: []u8,
-        ) !usize {
-            switch (state.*) {
-                .none => {
-                    const header = record_header(reader) catch |err| switch (err) {
-                        error.EndOfStream => return 0,
-                        else => |e| return e,
-                    };
-
-                    const record_length = header.len();
-                    if (record_length < 24)
-                        return error.ServerMalformedResponse;
-                    const len = record_length - 24;
-
-                    if ((header.tag() != 0x17 and header.tag() != 0x15) or
-                        (header.tag() == 0x15 and len != 2))
-                    {
-                        return error.ServerMalformedResponse;
-                    }
-
-                    const curr_bytes = if (header.tag() == 0x15)
-                        2
-                    else
-                        std.math.min(std.math.min(len, buf_size), buffer.len);
-
-                    var iv: [12]u8 = undefined;
-                    iv[0..4].* = key_data.server_iv(@This()).*;
-                    reader.readNoEof(iv[4..12]) catch |err| switch (err) {
-                        error.EndOfStream => return 0,
-                        else => |e| return e,
-                    };
-
-                    const aes = Aes.initEnc(key_data.server_key(@This()).*);
-
-                    var j: [16]u8 = undefined;
-                    mem.copy(u8, j[0..12], iv[0..]);
-                    mem.writeIntBig(u32, j[12..][0..4], 2);
-
-                    var counterInt = mem.readInt(u128, &j, .Big);
-                    var idx: usize = 0;
-
-                    if (header.tag() == 0x15) {
-                        var encrypted: [2]u8 = undefined;
-                        reader.readNoEof(&encrypted) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-
-                        var result: [2]u8 = undefined;
-                        ctr(
-                            @TypeOf(aes),
-                            aes,
-                            &result,
-                            &encrypted,
-                            &counterInt,
-                            &idx,
-                            .Big,
-                        );
-
-                        // @TODO Verify the message
-                        reader.skipBytes(16, .{}) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-                        server_seq.* += 1;
-                        // CloseNotify
-                        if (result[1] == 0)
-                            return 0;
-                        return alert_byte_to_error(result[1]);
-                    } else if (header.tag() == 0x17) {
-                        // Partially decrypt the data.
-                        var encrypted: [buf_size]u8 = undefined;
-                        const actually_read = try reader.read(encrypted[0..curr_bytes]);
-
-                        ctr(
-                            @TypeOf(aes),
-                            aes,
-                            buffer[0..actually_read],
-                            encrypted[0..actually_read],
-                            &counterInt,
-                            &idx,
-                            .Big,
-                        );
-
-                        if (actually_read < len) {
-                            state.* = .{
-                                .in_record = .{
-                                    .left = len - actually_read,
-                                    .aes = aes,
-                                    .counterInt = counterInt,
-                                    .idx = idx,
-                                },
-                            };
-                        } else {
-                            // @TODO Verify the message
-                            reader.skipBytes(16, .{}) catch |err| switch (err) {
-                                error.EndOfStream => return error.ServerMalformedResponse,
-                                else => |e| return e,
-                            };
-                            server_seq.* += 1;
-                        }
-                        return actually_read;
-                    } else unreachable;
-                },
-                .in_record => |*record_info| {
-                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), record_info.left);
-                    // Partially decrypt the data.
-                    var encrypted: [buf_size]u8 = undefined;
-                    const actually_read = try reader.read(encrypted[0..curr_bytes]);
-
-                    ctr(
-                        @TypeOf(record_info.aes),
-                        record_info.aes,
-                        buffer[0..actually_read],
-                        encrypted[0..actually_read],
-                        &record_info.counterInt,
-                        &record_info.idx,
-                        .Big,
-                    );
-                    record_info.left -= actually_read;
-                    if (record_info.left == 0) {
-                        // @TODO Verify the message
-                        reader.skipBytes(16, .{}) catch |err| switch (err) {
-                            error.EndOfStream => return error.ServerMalformedResponse,
-                            else => |e| return e,
-                        };
-                        state.* = .none;
-                        server_seq.* += 1;
-                    }
-                    return actually_read;
-                },
-            }
         }
     };
 
@@ -619,7 +414,7 @@ pub fn key_expansion(
     unreachable;
 }
 
-pub fn ClientState(comptime ciphersuites: anytype) type {
+pub fn InRecordState(comptime ciphersuites: anytype) type {
     var fields: [ciphersuites.len]std.builtin.TypeInfo.UnionField = undefined;
     for (ciphersuites) |cs, i| {
         fields[i] = .{
@@ -636,13 +431,4 @@ pub fn ClientState(comptime ciphersuites: anytype) type {
             .decls = &[0]std.builtin.TypeInfo.Declaration{},
         },
     });
-}
-
-pub fn client_state_default(comptime ciphersuites: anytype, tag: u16) ClientState(ciphersuites) {
-    inline for (ciphersuites) |cs| {
-        if (cs.tag == tag) {
-            return @unionInit(ClientState(ciphersuites), cs.name, cs.default_state);
-        }
-    }
-    unreachable;
 }

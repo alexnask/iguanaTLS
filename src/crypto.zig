@@ -124,7 +124,6 @@ pub const ChaCha20Stream = struct {
     pub fn chacha20Xor(out: []u8, in: []const u8, key: [8]u32, ctx: *BlockVec, idx: *usize, buf: *[64]u8) void {
         var x: BlockVec = undefined;
 
-        const start_idx = idx.*;
         var i: usize = 0;
         while (i < in.len) {
             if (idx.* % 64 == 0) {

@@ -1694,7 +1694,6 @@ pub fn client_connect(
     return Client(@TypeOf(reader), @TypeOf(writer), suites, has_alpn){
         .ciphersuite = ciphersuite,
         .key_data = key_data,
-        .state = ciphers.client_state_default(suites, ciphersuite),
         .rand = rand,
         .parent_reader = reader,
         .parent_writer = writer,
@@ -1713,11 +1712,21 @@ pub fn Client(
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
         pub const Writer = std.io.Writer(*@This(), _Writer.Error, write);
 
+        const InRecordState = ciphers.InRecordState(_ciphersuites);
+        const ReadState = union(enum) {
+            none,
+            in_record: struct {
+                record_length: usize,
+                index: usize = 0,
+                state: InRecordState,
+            },
+        };
+
         ciphersuite: u16,
         client_seq: u64 = 1,
         server_seq: u64 = 1,
         key_data: ciphers.KeyData(_ciphersuites),
-        state: ciphers.ClientState(_ciphersuites),
+        read_state: ReadState = .none,
         rand: *std.rand.Random,
 
         parent_reader: _Reader,
@@ -1734,20 +1743,147 @@ pub fn Client(
         }
 
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
-            inline for (_ciphersuites) |cs| {
-                if (self.ciphersuite == cs.tag) {
-                    // @TODO Make this buffer size configurable
-                    return try cs.read(
-                        1024,
-                        &@field(self.state, cs.name),
-                        &self.key_data,
-                        self.parent_reader,
-                        &self.server_seq,
-                        buffer,
-                    );
-                }
+            const buf_size = 1024;
+
+            switch (self.read_state) {
+                .none => {
+                    const header = record_header(self.parent_reader) catch |err| switch (err) {
+                        error.EndOfStream => return 0,
+                        else => |e| return e,
+                    };
+
+                    const len_overhead = inline for (_ciphersuites) |cs| {
+                        if (self.ciphersuite == cs.tag) {
+                            break cs.mac_length + cs.prefix_data_length;
+                        }
+                    } else unreachable;
+
+                    const rec_length = header.len();
+                    if (rec_length < len_overhead)
+                        return error.ServerMalformedResponse;
+                    const len = rec_length - len_overhead;
+
+                    if ((header.tag() != 0x17 and header.tag() != 0x15) or
+                        (header.tag() == 0x15 and len != 2))
+                    {
+                        return error.ServerMalformedResponse;
+                    }
+
+                    inline for (_ciphersuites) |cs| {
+                        if (self.ciphersuite == cs.tag) {
+                            var prefix_data: [cs.prefix_data_length]u8 = undefined;
+                            if (cs.prefix_data_length > 0) {
+                                self.parent_reader.readNoEof(&prefix_data) catch |err| switch (err) {
+                                    error.EndOfStream => return error.ServerMalformedResponse,
+                                    else => |e| return e,
+                                };
+                            }
+                            self.read_state = .{ .in_record = .{
+                                .record_length = len,
+                                .state = @unionInit(
+                                    InRecordState,
+                                    cs.name,
+                                    cs.init_state(prefix_data, self.server_seq, &self.key_data, header),
+                                ),
+                            } };
+                        }
+                    }
+
+                    if (header.tag() == 0x15) {
+                        var encrypted: [2]u8 = undefined;
+                        self.parent_reader.readNoEof(&encrypted) catch |err| switch (err) {
+                            error.EndOfStream => return error.ServerMalformedResponse,
+                            else => |e| return e,
+                        };
+
+                        var result: [2]u8 = undefined;
+                        inline for (_ciphersuites) |cs| {
+                            if (self.ciphersuite == cs.tag) {
+                                // This decrypt call should always consume the whole record
+                                cs.decrypt_part(
+                                    &self.key_data,
+                                    self.read_state.in_record.record_length,
+                                    &self.read_state.in_record.index,
+                                    &@field(self.read_state.in_record.state, cs.name),
+                                    &encrypted,
+                                    &result,
+                                );
+                                std.debug.assert(self.read_state.in_record.index == self.read_state.in_record.record_length);
+                                try cs.verify_mac(
+                                    self.parent_reader,
+                                    self.read_state.in_record.record_length,
+                                    &@field(self.read_state.in_record.state, cs.name),
+                                );
+                            }
+                        }
+                        self.read_state = .none;
+                        self.server_seq += 1;
+                        // CloseNotify
+                        if (result[1] == 0)
+                            return 0;
+                        return alert_byte_to_error(result[1]);
+                    } else if (header.tag() == 0x17) {
+                        const curr_bytes = std.math.min(std.math.min(len, buf_size), buffer.len);
+                        // Partially decrypt the data.
+                        var encrypted: [buf_size]u8 = undefined;
+                        const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
+
+                        inline for (_ciphersuites) |cs| {
+                            if (self.ciphersuite == cs.tag) {
+                                cs.decrypt_part(
+                                    &self.key_data,
+                                    self.read_state.in_record.record_length,
+                                    &self.read_state.in_record.index,
+                                    &@field(self.read_state.in_record.state, cs.name),
+                                    encrypted[0..actually_read],
+                                    buffer[0..actually_read],
+                                );
+
+                                if (self.read_state.in_record.index == self.read_state.in_record.record_length) {
+                                    try cs.verify_mac(
+                                        self.parent_reader,
+                                        self.read_state.in_record.record_length,
+                                        &@field(self.read_state.in_record.state, cs.name),
+                                    );
+                                    self.server_seq += 1;
+                                    self.read_state = .none;
+                                }
+                            }
+                        }
+                        return actually_read;
+                    } else unreachable;
+                },
+                .in_record => |*in_record| {
+                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), in_record.record_length - in_record.index);
+                    // Partially decrypt the data.
+                    var encrypted: [buf_size]u8 = undefined;
+                    const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
+
+                    inline for (_ciphersuites) |cs| {
+                        if (self.ciphersuite == cs.tag) {
+                            cs.decrypt_part(
+                                &self.key_data,
+                                in_record.record_length,
+                                &in_record.index,
+                                &@field(in_record.state, cs.name),
+                                encrypted[0..actually_read],
+                                buffer[0..actually_read],
+                            );
+
+                            if (in_record.index == in_record.record_length) {
+                                try cs.verify_mac(
+                                    self.parent_reader,
+                                    in_record.record_length,
+                                    &@field(in_record.state, cs.name),
+                                );
+                                self.server_seq += 1;
+                                self.read_state = .none;
+                            }
+                        }
+                    }
+                    return actually_read;
+                },
             }
-            unreachable;
         }
 
         pub fn write(self: *@This(), buffer: []const u8) _Writer.Error!usize {
