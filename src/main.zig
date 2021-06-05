@@ -26,33 +26,37 @@ fn handshake_record_length(reader: anytype) !usize {
     return try record_length(0x16, reader);
 }
 
-pub const RecordTagLength = struct {
-    tag: u8,
-    length: u16,
+pub const RecordHeader = struct {
+    data: [5]u8,
+
+    pub inline fn tag(self: @This()) u8 {
+        return self.data[0];
+    }
+
+    pub inline fn len(self: @This()) u16 {
+        return mem.readIntSliceBig(u16, self.data[3..]);
+    }
 };
-pub fn record_tag_length(reader: anytype) !RecordTagLength {
-    const record_tag = try reader.readByte();
 
-    var record_header: [4]u8 = undefined;
-    try reader.readNoEof(&record_header);
+pub fn record_header(reader: anytype) !RecordHeader {
+    var header: [5]u8 = undefined;
+    try reader.readNoEof(&header);
 
-    if (!mem.eql(u8, record_header[0..2], "\x03\x03") and !mem.eql(u8, record_header[0..2], "\x03\x01"))
+    if (!mem.eql(u8, header[1..3], "\x03\x03") and !mem.eql(u8, header[1..3], "\x03\x01"))
         return error.ServerInvalidVersion;
 
-    const len = mem.readIntSliceBig(u16, record_header[2..4]);
-    return RecordTagLength{
-        .tag = record_tag,
-        .length = len,
+    return RecordHeader{
+        .data = header,
     };
 }
 
 pub fn record_length(t: u8, reader: anytype) !usize {
     try check_record_type(t, reader);
-    var record_header: [4]u8 = undefined;
-    try reader.readNoEof(&record_header);
-    if (!mem.eql(u8, record_header[0..2], "\x03\x03") and !mem.eql(u8, record_header[0..2], "\x03\x01"))
+    var header: [4]u8 = undefined;
+    try reader.readNoEof(&header);
+    if (!mem.eql(u8, header[0..2], "\x03\x03") and !mem.eql(u8, header[0..2], "\x03\x01"))
         return error.ServerInvalidVersion;
-    return mem.readIntSliceBig(u16, record_header[2..4]);
+    return mem.readIntSliceBig(u16, header[2..4]);
 }
 
 pub const ServerAlert = error{
@@ -798,7 +802,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: *std.rand.Random) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -806,11 +810,11 @@ pub const curves = struct {
             } else unreachable;
         }
 
-        fn make_pre_master_secret(
+        inline fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [32]u8,
-        ) callconv(.Inline) ![]const u8 {
+        ) ![]const u8 {
             pre_master_secret_buf[0..32].* = std.crypto.dh.X25519.scalarmult(
                 key_pair.secret_key,
                 server_public_key.*,
@@ -825,17 +829,17 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: *std.rand.Random) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
         }
 
-        fn make_pre_master_secret(
+        inline fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [97]u8,
-        ) callconv(.Inline) ![]const u8 {
+        ) ![]const u8 {
             pre_master_secret_buf[0..96].* = crypto.ecc.scalarmult(
                 crypto.ecc.SECP384R1,
                 server_public_key[1..].*,
@@ -851,17 +855,17 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: *std.rand.Random) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
         }
 
-        fn make_pre_master_secret(
+        inline fn make_pre_master_secret(
             key_pair: Keys,
             pre_master_secret_buf: []u8,
             server_public_key: *const [65]u8,
-        ) callconv(.Inline) ![]const u8 {
+        ) ![]const u8 {
             pre_master_secret_buf[0..64].* = crypto.ecc.scalarmult(
                 crypto.ecc.SECP256R1,
                 server_public_key[1..].*,
@@ -911,7 +915,7 @@ pub const curves = struct {
         });
     }
 
-    fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) callconv(.Inline) KeyPair(list) {
+    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -920,13 +924,13 @@ pub const curves = struct {
         unreachable;
     }
 
-    fn make_pre_master_secret(
+    inline fn make_pre_master_secret(
         comptime list: anytype,
         curve_id: u16,
         key_pair: KeyPair(list),
         pre_master_secret_buf: *[max_pre_master_secret_len(list)]u8,
         server_public_key: [max_pub_key_len(list)]u8,
-    ) callconv(.Inline) ![]const u8 {
+    ) ![]const u8 {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return try curve.make_pre_master_secret(
@@ -1570,11 +1574,11 @@ pub fn client_connect(
         };
 
         const next_32_bytes = struct {
-            fn f(
+            inline fn f(
                 state: *KeyExpansionState,
                 comptime chunk_idx: comptime_int,
                 chunk: *[32]u8,
-            ) callconv(.Inline) void {
+            ) void {
                 if (chunk_idx == 0) {
                     Hmac256.create(state.a1[0..32], state.seed, state.master_secret);
                     Hmac256.create(chunk, state.a1, state.master_secret);
@@ -1696,7 +1700,7 @@ pub fn Client(
     comptime has_protocol: bool,
 ) type {
     return struct {
-        const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion };
+        const ReaderError = _Reader.Error || ServerAlert || error{ ServerMalformedResponse, ServerInvalidVersion, AuthenticationFailed };
         pub const Reader = std.io.Reader(*@This(), ReaderError, read);
         pub const Writer = std.io.Writer(*@This(), _Writer.Error, write);
 
@@ -1808,7 +1812,6 @@ test "HTTPS request on wikipedia main page" {
         .curves = .{curves.x25519},
     }, "en.wikipedia.org");
     defer client.close_notify() catch {};
-
     try std.testing.expectEqualStrings("http/1.1", client.protocol);
     try client.writer().writeAll("GET /wiki/Main_Page HTTP/1.1\r\nHost: en.wikipedia.org\r\nAccept: */*\r\n\r\n");
 

@@ -1,6 +1,9 @@
 const std = @import("std");
 const mem = std.mem;
 
+const Poly1305 = std.crypto.onetimeauth.Poly1305;
+const Chacha20IETF = std.crypto.stream.chacha.ChaCha20IETF;
+
 // TODO See stdlib, this is a modified non vectorized implementation
 pub const ChaCha20Stream = struct {
     const math = std.math;
@@ -38,7 +41,7 @@ pub const ChaCha20Stream = struct {
         };
     }
 
-    fn chacha20Core(x: *BlockVec, input: BlockVec) callconv(.Inline) void {
+    inline fn chacha20Core(x: *BlockVec, input: BlockVec) void {
         x.* = input;
 
         const rounds = comptime [_]QuarterRound{
@@ -67,7 +70,7 @@ pub const ChaCha20Stream = struct {
         }
     }
 
-    fn hashToBytes(out: *[64]u8, x: BlockVec) callconv(.Inline) void {
+    inline fn hashToBytes(out: *[64]u8, x: BlockVec) void {
         var i: usize = 0;
         while (i < 4) : (i += 1) {
             mem.writeIntLittle(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0]);
@@ -77,10 +80,43 @@ pub const ChaCha20Stream = struct {
         }
     }
 
-    fn contextFeedback(x: *BlockVec, ctx: BlockVec) callconv(.Inline) void {
+    inline fn contextFeedback(x: *BlockVec, ctx: BlockVec) void {
         var i: usize = 0;
         while (i < 16) : (i += 1) {
             x[i] +%= ctx[i];
+        }
+    }
+
+    pub fn initPoly1305(key: [32]u8, nonce: [12]u8, ad: [13]u8) Poly1305 {
+        var polyKey = [_]u8{0} ** 32;
+        Chacha20IETF.xor(&polyKey, &polyKey, 0, key, nonce);
+        var mac = Poly1305.init(&polyKey);
+        mac.update(&ad);
+        // Pad to 16 bytes from ad
+        mac.update(&.{ 0, 0, 0 });
+        return mac;
+    }
+
+    /// Call after `mac` has been updated with the whole message
+    pub fn checkPoly1305(mac: *Poly1305, len: usize, tag: [16]u8) !void {
+        if (len % 16 != 0) {
+            const zeros = [_]u8{0} ** 16;
+            const padding = 16 - (len % 16);
+            mac.update(zeros[0..padding]);
+        }
+        var lens: [16]u8 = undefined;
+        mem.writeIntLittle(u64, lens[0..8], 13);
+        mem.writeIntLittle(u64, lens[8..16], len);
+        mac.update(lens[0..]);
+        var computedTag: [16]u8 = undefined;
+        mac.final(computedTag[0..]);
+
+        var acc: u8 = 0;
+        for (computedTag) |_, i| {
+            acc |= computedTag[i] ^ tag[i];
+        }
+        if (acc != 0) {
+            return error.AuthenticationFailed;
         }
     }
 
@@ -395,10 +431,10 @@ pub const ecc = struct {
         P.* = Q;
     }
 
-    fn point_double(comptime Curve: type, P: *Jacobian(Curve)) callconv(.Inline) void {
+    inline fn point_double(comptime Curve: type, P: *Jacobian(Curve)) void {
         _ = run_code(Curve, P, P.*, &code.double);
     }
-    fn point_add(comptime Curve: type, P1: *Jacobian(Curve), P2: Jacobian(Curve)) callconv(.Inline) void {
+    inline fn point_add(comptime Curve: type, P1: *Jacobian(Curve), P2: Jacobian(Curve)) void {
         _ = run_code(Curve, P1, P2, &code._add);
     }
 
@@ -668,39 +704,39 @@ pub const ecc = struct {
         return result;
     }
 
-    fn MUL31(x: u32, y: u32) callconv(.Inline) u64 {
+    inline fn MUL31(x: u32, y: u32) u64 {
         return @as(u64, x) * @as(u64, y);
     }
 
-    fn MUL31_lo(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn MUL31_lo(x: u32, y: u32) u32 {
         return (x *% y) & 0x7FFFFFFF;
     }
 
-    fn MUX(ctl: u32, x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn MUX(ctl: u32, x: u32, y: u32) u32 {
         return y ^ (@bitCast(u32, -@bitCast(i32, ctl)) & (x ^ y));
     }
-    fn NOT(ctl: u32) callconv(.Inline) u32 {
+    inline fn NOT(ctl: u32) u32 {
         return ctl ^ 1;
     }
-    fn NEQ(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn NEQ(x: u32, y: u32) u32 {
         const q = x ^ y;
         return (q | @bitCast(u32, -@bitCast(i32, q))) >> 31;
     }
-    fn EQ(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn EQ(x: u32, y: u32) u32 {
         const q = x ^ y;
         return NOT((q | @bitCast(u32, -@bitCast(i32, q))) >> 31);
     }
-    fn CMP(x: u32, y: u32) callconv(.Inline) i32 {
+    inline fn CMP(x: u32, y: u32) i32 {
         return @bitCast(i32, GT(x, y)) | -@bitCast(i32, GT(y, x));
     }
-    fn GT(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn GT(x: u32, y: u32) u32 {
         const z = y -% x;
         return (z ^ ((x ^ y) & (x ^ z))) >> 31;
     }
-    fn LT(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn LT(x: u32, y: u32) u32 {
         return GT(y, x);
     }
-    fn GE(x: u32, y: u32) callconv(.Inline) u32 {
+    inline fn GE(x: u32, y: u32) u32 {
         return NOT(GT(y, x));
     }
 
@@ -710,7 +746,7 @@ pub const ecc = struct {
         }
     }
 
-    fn set_zero(out: [*]u32, bit_len: u32) callconv(.Inline) void {
+    inline fn set_zero(out: [*]u32, bit_len: u32) void {
         out[0] = bit_len;
         mem.set(u32, (out + 1)[0 .. (bit_len + 31) >> 5], 0);
     }
@@ -739,7 +775,7 @@ pub const ecc = struct {
         return q;
     }
 
-    fn div(hi: u32, lo: u32, d: u32) callconv(.Inline) u32 {
+    inline fn div(hi: u32, lo: u32, d: u32) u32 {
         var r: u32 = undefined;
         return divrem(hi, lo, d, &r);
     }
