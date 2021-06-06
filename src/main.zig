@@ -2076,14 +2076,18 @@ test "Connecting to expired.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    if (client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
-    }, "expired.badssl.com"));
+    }, "expired.badssl.com")) |_| {
+        return error.ExpectedVerificationFailed;
+    } else |err| {
+        try std.testing.expect(err == error.CertificateVerificationFailed);
+    }
 }
 
 test "Connecting to wrong.host.badssl.com returns an error" {
@@ -2101,14 +2105,18 @@ test "Connecting to wrong.host.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    if (client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
-    }, "wrong.host.badssl.com"));
+    }, "wrong.host.badssl.com")) |_| {
+        return error.ExpectedVerificationFailed;
+    } else |err| {
+        try std.testing.expect(err == error.CertificateVerificationFailed);
+    }
 }
 
 test "Connecting to self-signed.badssl.com returns an error" {
@@ -2126,14 +2134,18 @@ test "Connecting to self-signed.badssl.com returns an error" {
         break :blk &std.rand.DefaultCsprng.init(seed).random;
     };
 
-    try std.testing.expectError(error.CertificateVerificationFailed, client_connect(.{
+    if (client_connect(.{
         .rand = rand,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
         .temp_allocator = std.testing.allocator,
         .trusted_certificates = trusted_chain.data.items,
-    }, "self-signed.badssl.com"));
+    }, "self-signed.badssl.com")) |_| {
+        return error.ExpectedVerificationFailed;
+    } else |err| {
+        try std.testing.expect(err == error.CertificateVerificationFailed);
+    }
 }
 
 test "Connecting to client.badssl.com with a client certificate" {
