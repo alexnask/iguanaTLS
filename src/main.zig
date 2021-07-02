@@ -98,6 +98,7 @@ fn check_record_type(
         try reader.skipBytes(4, .{});
 
         const severity = try reader.readByte();
+        _ = severity;
         const err_num = try reader.readByte();
         return alert_byte_to_error(err_num);
     }
@@ -330,6 +331,8 @@ fn read_der_utc_timestamp(reader: anytype) !i64 {
 }
 
 fn check_cert_timestamp(time: i64, tag_byte: u8, length: usize, reader: anytype) !void {
+    _ = tag_byte;
+    _ = length;
     if (time < (try read_der_utc_timestamp(reader)))
         return error.CertificateVerificationFailed;
     if (time > (try read_der_utc_timestamp(reader)))
@@ -337,10 +340,14 @@ fn check_cert_timestamp(time: i64, tag_byte: u8, length: usize, reader: anytype)
 }
 
 fn add_dn_field(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = length;
+    _ = tag;
+
     const seq_tag = try reader.readByte();
     if (seq_tag != 0x30)
         return error.CertificateVerificationFailed;
     const seq_length = try asn1.der.parse_length(reader);
+    _ = seq_length;
 
     const oid_tag = try reader.readByte();
     if (oid_tag != 0x06)
@@ -371,7 +378,10 @@ fn add_cert_subject_dn(state: *VerifierCaptureState, tag: u8, length: usize, rea
     try asn1.der.parse_schema_tag_len(tag, length, schema, captures, reader);
 }
 
-fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
+fn add_cert_public_key(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = tag;
+    _ = length;
+
     state.list.items[state.list.items.len - 1].public_key = x509.parse_public_key(
         state.allocator,
         reader,
@@ -382,6 +392,9 @@ fn add_cert_public_key(state: *VerifierCaptureState, _: u8, length: usize, reade
 }
 
 fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = tag;
+    _ = length;
+
     const schema = .{
         .sequence_of,
         .{ .capture, 0, .sequence },
@@ -394,6 +407,9 @@ fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, rea
 }
 
 fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = tag;
+    _ = length;
+
     const start = state.fbs.pos;
 
     // The happy path is allocation free
@@ -415,6 +431,7 @@ fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, read
             if (san_tag != @enumToInt(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
 
             const san_length = try asn1.der.parse_length(reader);
+            _ = san_length;
 
             const body_tag = try reader.readByte();
             if (body_tag != @enumToInt(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
@@ -498,12 +515,18 @@ fn add_server_cert(state: *VerifierCaptureState, tag_byte: u8, length: usize, re
     };
 }
 
-fn set_signature_algorithm(state: *VerifierCaptureState, _: u8, length: usize, reader: anytype) !void {
+fn set_signature_algorithm(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = tag;
+    _ = length;
+
     const cert = &state.list.items[state.list.items.len - 1];
     cert.signature_algorithm = (try x509.get_signature_algorithm(reader)) orelse return error.CertificateVerificationFailed;
 }
 
 fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
+    _ = tag;
+    _ = length;
+
     const unused_bits = try reader.readByte();
     const bit_count = (length - 1) * 8 - unused_bits;
     const signature_bytes = try state.allocator.alloc(u8, length - 1);
@@ -744,7 +767,6 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
         .allocator = allocator,
     };
 
-    var pub_key: x509.PublicKey = undefined;
     const schema = .{
         .sequence, .{
             // tbsCertificate
@@ -771,7 +793,10 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
     };
     const captures = .{
         &capture_state, struct {
-            fn f(state: *CaptureState, tag: u8, _: usize, subreader: anytype) !void {
+            fn f(state: *CaptureState, tag: u8, _length: usize, subreader: anytype) !void {
+                _ = tag;
+                _ = _length;
+
                 state.pub_key = x509.parse_public_key(state.allocator, subreader) catch |err| switch (err) {
                     error.MalformedDER => return error.ServerMalformedResponse,
                     else => |e| return e,
@@ -1038,7 +1063,7 @@ pub fn client_connect(
             // Same as above, couldnt achieve this with a single buffer.
             // TLS_EMPTY_RENEGOTIATION_INFO_SCSV
             var ciphersuite_buf: []const u8 = &[2]u8{ 0x00, 0x0f };
-            for (suites) |cs, i| {
+            for (suites) |cs| {
                 // Also check for properties of the ciphersuites here
                 if (cs.key_exchange != .ecdhe)
                     @compileError("Non ECDHE key exchange is not supported yet.");
@@ -1212,6 +1237,7 @@ pub fn client_connect(
     var certificate_public_key: x509.PublicKey = undefined;
     {
         const length = try handshake_record_length(reader);
+        _ = length;
         {
             var handshake_header: [4]u8 = undefined;
             try hashing_reader.readNoEof(&handshake_header);
@@ -1252,6 +1278,7 @@ pub fn client_connect(
     var pub_key_len: u8 = undefined;
     {
         const length = try handshake_record_length(reader);
+        _ = length;
         {
             var handshake_header: [4]u8 = undefined;
             try hashing_reader.readNoEof(&handshake_header);

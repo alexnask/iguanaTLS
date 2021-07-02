@@ -243,7 +243,7 @@ pub const der = struct {
         comptime std.debug.assert(isEnumLit(@TypeOf(tag_literal)));
 
         const tag_byte = existing_tag_byte orelse (der_reader.readByte() catch |err| switch (err) {
-            error.EndOfStream => |e| return if (is_optional) null else error.EndOfStream,
+            error.EndOfStream => return if (is_optional) null else error.EndOfStream,
             else => |e| return e,
         });
 

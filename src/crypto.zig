@@ -122,6 +122,8 @@ pub const ChaCha20Stream = struct {
 
     // TODO: Optimize this
     pub fn chacha20Xor(out: []u8, in: []const u8, key: [8]u32, ctx: *BlockVec, idx: *usize, buf: *[64]u8) void {
+        _ = key;
+
         var x: BlockVec = undefined;
 
         var i: usize = 0;
@@ -161,7 +163,7 @@ pub fn ctr(
     src: []const u8,
     counterInt: *u128,
     idx: *usize,
-    endian: comptime std.builtin.Endian,
+    endian: std.builtin.Endian,
 ) void {
     std.debug.assert(dst.len >= src.len);
     const block_length = BlockCipher.block_length;
@@ -381,7 +383,7 @@ pub const ecc = struct {
     }
 
     fn jacobian_with_one_set(comptime Curve: type, comptime fields: [2][jacobian_len(Curve)]u32) Jacobian(Curve) {
-        comptime const plen = (Curve.P[0] + 63) >> 5;
+        const plen = comptime (Curve.P[0] + 63) >> 5;
         return fields ++ [1][jacobian_len(Curve)]u32{
             [2]u32{ Curve.P[0], 1 } ++ ([1]u32{0} ** (plen - 2)),
         };
@@ -663,7 +665,7 @@ pub const ecc = struct {
         P2: Jacobian(Curve),
         comptime Code: []const u16,
     ) u32 {
-        comptime const jaclen = jacobian_len(Curve);
+        const jaclen = comptime jacobian_len(Curve);
 
         var t: [13][jaclen]u32 = undefined;
         var result: u32 = 1;
@@ -676,9 +678,9 @@ pub const ecc = struct {
             comptime var op = Code[u];
             if (op == 0)
                 break;
-            comptime const d = (op >> 8) & 0x0F;
-            comptime const a = (op >> 4) & 0x0F;
-            comptime const b = op & 0x0F;
+            const d = comptime (op >> 8) & 0x0F;
+            const a = comptime (op >> 4) & 0x0F;
+            const b = comptime op & 0x0F;
             op >>= 12;
 
             switch (op) {
@@ -841,12 +843,11 @@ pub const ecc = struct {
         t1: *[jacobian_len(Curve)]u32,
         t2: *[jacobian_len(Curve)]u32,
     ) void {
-        comptime const jaclen = jacobian_len(Curve);
         t1.* = x.*;
         to_monty(t1, &Curve.P);
         set_zero(x, Curve.P[0]);
         x[1] = 1;
-        comptime const bitlen = (Curve.point_len / 2) << 3;
+        const bitlen = comptime (Curve.point_len / 2) << 3;
         var k: usize = 0;
         while (k < bitlen) : (k += 1) {
             const ctl = (e[Curve.point_len / 2 - 1 - (k >> 3)] >> (@truncate(u3, k & 7))) & 1;
@@ -979,7 +980,7 @@ test "elliptic curve functions with secp384r1 curve" {
     {
         // Decode to Jacobian then encode again with no operations
         var P: ecc.Jacobian(ecc.SECP384R1) = undefined;
-        var res: u32 = ecc.decode_to_jacobian(ecc.SECP384R1, &P, ecc.SECP384R1.base_point);
+        _ = ecc.decode_to_jacobian(ecc.SECP384R1, &P, ecc.SECP384R1.base_point);
         var out: [96]u8 = undefined;
         ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
         try std.testing.expectEqual(ecc.SECP384R1.base_point, out);

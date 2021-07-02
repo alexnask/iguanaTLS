@@ -66,6 +66,8 @@ pub const suites = struct {
             encrypted: []const u8,
             out: []u8,
         ) void {
+            _ = record_length;
+
             std.debug.assert(encrypted.len == out.len);
             ChaCha20Stream.chacha20Xor(
                 out,
@@ -97,6 +99,8 @@ pub const suites = struct {
             seq: u64,
             buffer: []const u8,
         ) !void {
+            _ = rand;
+
             std.debug.assert(buffer.len <= buffer_size);
             try writer.writeAll(&prefix);
             try writer.writeIntBig(u16, @intCast(u16, buffer.len + 16));
@@ -176,7 +180,9 @@ pub const suites = struct {
         };
 
         pub fn init_state(prefix_data: [8]u8, server_seq: u64, key_data: anytype, header: RecordHeader) State {
-            const len = header.len() - 16;
+            _ = server_seq;
+            _ = header;
+
             var iv: [12]u8 = undefined;
             iv[0..4].* = key_data.server_iv(@This()).*;
             iv[4..].* = prefix_data;
@@ -199,6 +205,9 @@ pub const suites = struct {
             encrypted: []const u8,
             out: []u8,
         ) void {
+            _ = key_data;
+            _ = record_length;
+
             std.debug.assert(encrypted.len == out.len);
 
             ctr(
@@ -213,6 +222,8 @@ pub const suites = struct {
         }
 
         pub fn verify_mac(reader: anytype, record_length: usize, state: *State) !void {
+            _ = state;
+            _ = record_length;
             // @TODO Implement this
             reader.skipBytes(16, .{}) catch |err| switch (err) {
                 error.EndOfStream => return error.ServerMalformedResponse,
