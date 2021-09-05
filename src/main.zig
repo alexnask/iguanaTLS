@@ -1602,12 +1602,16 @@ pub fn client_connect(
         a1[32..].* = seed;
         a2[32..].* = seed;
 
-        const KeyExpansionState = struct {
-            seed: *const [77]u8,
-            a1: *[32 + seed.len]u8,
-            a2: *[32 + seed.len]u8,
-            master_secret: *const [48]u8,
-        };
+        {
+            const seedlen = seed.len;
+
+            const KeyExpansionState = struct {
+                seed: *const [77]u8,
+                a1: *[32 + seedlen]u8,
+                a2: *[32 + seedlen]u8,
+                master_secret: *const [48]u8,
+            };
+        }
 
         const next_32_bytes = struct {
             inline fn f(
