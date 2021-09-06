@@ -1,7 +1,8 @@
 const std = @import("std");
 const mem = std.mem;
 
-usingnamespace @import("crypto.zig");
+const crypto = @import("crypto.zig");
+const ChaCha20Stream = crypto.ChaCha20Stream;
 const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
@@ -49,7 +50,7 @@ pub const suites = struct {
             c[1] = mem.readIntLittle(u32, nonce[0..4]);
             c[2] = mem.readIntLittle(u32, nonce[4..8]);
             c[3] = mem.readIntLittle(u32, nonce[8..12]);
-            const server_key = keyToWords(key_data.server_key(@This()).*);
+            const server_key = crypto.keyToWords(key_data.server_key(@This()).*);
 
             return .{
                 .mac = ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
@@ -72,7 +73,7 @@ pub const suites = struct {
             ChaCha20Stream.chacha20Xor(
                 out,
                 encrypted,
-                keyToWords(key_data.server_key(@This()).*),
+                crypto.keyToWords(key_data.server_key(@This()).*),
                 &state.context,
                 idx,
                 &state.buf,
@@ -210,7 +211,7 @@ pub const suites = struct {
 
             std.debug.assert(encrypted.len == out.len);
 
-            ctr(
+            crypto.ctr(
                 @TypeOf(state.aes),
                 state.aes,
                 out,
