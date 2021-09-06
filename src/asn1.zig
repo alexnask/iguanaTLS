@@ -243,7 +243,7 @@ pub const der = struct {
         comptime std.debug.assert(isEnumLit(@TypeOf(tag_literal)));
 
         const tag_byte = existing_tag_byte orelse (der_reader.readByte() catch |err| switch (err) {
-            error.EndOfStream => |e| return if (is_optional) null else error.EndOfStream,
+            error.EndOfStream => return if (is_optional) null else error.EndOfStream,
             else => |e| return e,
         });
 
@@ -335,7 +335,7 @@ pub const der = struct {
         const schema_tag: Tag = tag_literal;
         const actual_tag = std.meta.intToEnum(Tag, tag_byte) catch return error.InvalidTag;
         if (actual_tag != schema_tag) {
-            if (is_optional) return tag_byte;
+            if (is_optional) return TagLength{ .tag = tag_byte, .length = length };
             return error.DoesNotMatchSchema;
         }
 
@@ -399,7 +399,7 @@ pub const der = struct {
                 enc.data[1 .. bytes_needed + 1],
                 mem.asBytes(&length)[0..bytes_needed],
             );
-            if (std.builtin.endian != .Big) {
+            if (std.builtin.target.cpu.arch.endian() != .Big) {
                 mem.reverse(u8, enc.data[1 .. bytes_needed + 1]);
             }
             enc.len = bytes_needed;
@@ -409,6 +409,20 @@ pub const der = struct {
 
     fn parse_int_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
         const length = try parse_length_internal(bytes_read, der_reader);
+        return try parse_int_with_length_internal(alloc, bytes_read, length, der_reader);
+    }
+
+    pub fn parse_int(alloc: *Allocator, der_reader: anytype) !BigInt {
+        var bytes: usize = undefined;
+        return try parse_int_internal(alloc, &bytes, der_reader);
+    }
+
+    pub fn parse_int_with_length(alloc: *Allocator, length: usize, der_reader: anytype) !BigInt {
+        var read: usize = 0;
+        return try parse_int_with_length_internal(alloc, &read, length, der_reader);
+    }
+
+    fn parse_int_with_length_internal(alloc: *Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
         const first_byte = try der_reader.readByte();
         if (first_byte == 0x0 and length > 1) {
             // Positive number with highest bit set to 1 in the rest.
@@ -443,11 +457,6 @@ pub const der = struct {
         return BigInt{ .limbs = limbs, .positive = (first_byte & 0x80) == 0x00 };
     }
 
-    pub fn parse_int(alloc: *Allocator, der_reader: anytype) !BigInt {
-        var bytes: usize = undefined;
-        return try parse_int_internal(alloc, &bytes, der_reader);
-    }
-
     pub fn parse_length(der_reader: anytype) !usize {
         var bytes: usize = 0;
         return try parse_length_internal(&bytes, der_reader);
@@ -468,7 +477,7 @@ pub const der = struct {
         try der_reader.readNoEof(res_buf[0..length]);
         bytes_read.* += length;
 
-        if (std.builtin.endian != .Big) {
+        if (std.builtin.target.cpu.arch.endian() != .Big) {
             mem.reverse(u8, res_buf[0..length]);
         }
         return mem.bytesToValue(usize, &res_buf);
