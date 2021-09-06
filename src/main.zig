@@ -1574,7 +1574,7 @@ pub fn client_connect(
             server_public_key_buf,
         );
 
-        var seed: [77]u8 = undefined;
+        const seed: [77]u8 = undefined;
         seed[0..13].* = "master secret".*;
         seed[13..45].* = client_random;
         seed[45..77].* = server_random;
