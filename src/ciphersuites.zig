@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
-usingnamespace @import("crypto.zig");
+const crypto = @import("crypto.zig");
 const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
@@ -27,7 +27,7 @@ pub const suites = struct {
 
         pub const State = struct {
             mac: Poly1305,
-            context: ChaCha20Stream.BlockVec,
+            context: crypto.ChaCha20Stream.BlockVec,
             buf: [64]u8,
         };
 
@@ -49,11 +49,11 @@ pub const suites = struct {
             c[1] = mem.readIntLittle(u32, nonce[0..4]);
             c[2] = mem.readIntLittle(u32, nonce[4..8]);
             c[3] = mem.readIntLittle(u32, nonce[8..12]);
-            const server_key = keyToWords(key_data.server_key(@This()).*);
+            const server_key = crypto.keyToWords(key_data.server_key(@This()).*);
 
             return .{
-                .mac = ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
-                .context = ChaCha20Stream.initContext(server_key, c),
+                .mac = crypto.ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
+                .context = crypto.ChaCha20Stream.initContext(server_key, c),
                 .buf = undefined,
             };
         }
@@ -69,10 +69,10 @@ pub const suites = struct {
             _ = record_length;
 
             std.debug.assert(encrypted.len == out.len);
-            ChaCha20Stream.chacha20Xor(
+            crypto.ChaCha20Stream.chacha20Xor(
                 out,
                 encrypted,
-                keyToWords(key_data.server_key(@This()).*),
+                crypto.keyToWords(key_data.server_key(@This()).*),
                 &state.context,
                 idx,
                 &state.buf,
@@ -87,7 +87,7 @@ pub const suites = struct {
                 error.EndOfStream => return error.ServerMalformedResponse,
                 else => |e| return e,
             };
-            try ChaCha20Stream.checkPoly1305(&state.mac, record_length, poly1305_tag);
+            try crypto.ChaCha20Stream.checkPoly1305(&state.mac, record_length, poly1305_tag);
         }
 
         pub fn raw_write(
@@ -210,7 +210,7 @@ pub const suites = struct {
 
             std.debug.assert(encrypted.len == out.len);
 
-            ctr(
+            crypto.ctr(
                 @TypeOf(state.aes),
                 state.aes,
                 out,
