@@ -1574,14 +1574,15 @@ pub fn client_connect(
             server_public_key_buf,
         );
 
-        const seed: [77]u8 = undefined;
+        const seedlen = 77;
+        var seed: [seedlen]u8 = undefined;
         seed[0..13].* = "master secret".*;
         seed[13..45].* = client_random;
         seed[45..77].* = server_random;
 
-        var a1: [32 + seed.len]u8 = undefined;
+        var a1: [32 + seedlen]u8 = undefined;
         Hmac256.create(a1[0..32], &seed, pre_master_secret);
-        var a2: [32 + seed.len]u8 = undefined;
+        var a2: [32 + seedlen]u8 = undefined;
         Hmac256.create(a2[0..32], a1[0..32], pre_master_secret);
 
         a1[32..].* = seed;
@@ -1604,8 +1605,8 @@ pub fn client_connect(
 
         const KeyExpansionState = struct {
             seed: *const [77]u8,
-            a1: *[32 + seed.len]u8,
-            a2: *[32 + seed.len]u8,
+            a1: *[32 + seedlen]u8,
+            a2: *[32 + seedlen]u8,
             master_secret: *const [48]u8,
         };
 
