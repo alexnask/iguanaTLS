@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const BigInt = std.math.big.int.Const;
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -399,7 +400,7 @@ pub const der = struct {
                 enc.data[1 .. bytes_needed + 1],
                 mem.asBytes(&length)[0..bytes_needed],
             );
-            if (std.builtin.target.cpu.arch.endian() != .Big) {
+            if (builtin.target.cpu.arch.endian() != .Big) {
                 mem.reverse(u8, enc.data[1 .. bytes_needed + 1]);
             }
             enc.len = bytes_needed;
@@ -477,7 +478,7 @@ pub const der = struct {
         try der_reader.readNoEof(res_buf[0..length]);
         bytes_read.* += length;
 
-        if (std.builtin.target.cpu.arch.endian() != .Big) {
+        if (builtin.target.cpu.arch.endian() != .Big) {
             mem.reverse(u8, res_buf[0..length]);
         }
         return mem.bytesToValue(usize, &res_buf);
