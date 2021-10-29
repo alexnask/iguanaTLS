@@ -994,11 +994,12 @@ test "elliptic curve functions with secp384r1 curve" {
 
     {
         // @TODO Remove this once std.crypto.rand works in .evented mode
-        var rand = blk: {
+        var rand_impl = blk: {
             var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
             try std.os.getrandom(&seed);
-            break :blk &std.rand.DefaultCsprng.init(seed).random;
+            break :blk &std.rand.DefaultCsprng.init(seed);
         };
+        const rand = rand_impl.random();
 
         // Derive a shared secret from a Diffie-Hellman key exchange
         var seed: [48]u8 = undefined;

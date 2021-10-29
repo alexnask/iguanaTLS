@@ -1967,11 +1967,12 @@ test "HTTPS request on wikipedia main page" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2025,11 +2026,12 @@ test "HTTPS request on wikipedia alternate name" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2050,11 +2052,12 @@ test "HTTPS request on twitch oath2 endpoint" {
     defer sock.close();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2098,11 +2101,12 @@ test "Connecting to expired.badssl.com returns an error" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     if (client_connect(.{
         .rand = rand,
@@ -2127,11 +2131,12 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     if (client_connect(.{
         .rand = rand,
@@ -2156,11 +2161,12 @@ test "Connecting to self-signed.badssl.com returns an error" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     if (client_connect(.{
         .rand = rand,
@@ -2185,11 +2191,12 @@ test "Connecting to client.badssl.com with a client certificate" {
     defer trusted_chain.deinit();
 
     // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
+    var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
+    const rand = rand_impl.random();
 
     var client_cert = try x509.ClientCertificateChain.from_pem(
         std.testing.allocator,
