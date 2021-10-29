@@ -827,7 +827,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -854,7 +854,7 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
@@ -880,7 +880,7 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        fn make_key_pair(rand: *std.rand.Random) callconv(.Inline) Keys {
+        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
@@ -940,7 +940,7 @@ pub const curves = struct {
         });
     }
 
-    fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) callconv(.Inline) KeyPair(list) {
+    fn make_key_pair(comptime list: anytype, curve_id: u16, rand: std.rand.Random) callconv(.Inline) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -1026,7 +1026,7 @@ pub fn client_connect(
 
     var client_random: [32]u8 = undefined;
     const rand = if (!@hasField(Options, "rand"))
-        std.crypto.random
+        std.crypto.random.*
     else
         options.rand;
 
@@ -1755,7 +1755,7 @@ pub fn Client(
         server_seq: u64 = 1,
         key_data: ciphers.KeyData(_ciphersuites),
         read_state: ReadState = .none,
-        rand: *std.rand.Random,
+        rand: std.rand.Random,
 
         parent_reader: _Reader,
         parent_writer: _Writer,
