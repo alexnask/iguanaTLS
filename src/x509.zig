@@ -35,7 +35,7 @@ pub const PublicKey = union(enum) {
         curve_point: []const u8,
     },
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         switch (self) {
             .rsa => |rsa| {
                 alloc.free(rsa.modulus);
@@ -58,7 +58,7 @@ pub const PublicKey = union(enum) {
 
 pub const PrivateKey = PublicKey;
 
-pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
+pub fn parse_public_key(allocator: Allocator, reader: anytype) !PublicKey {
     if ((try reader.readByte()) != 0x30)
         return error.MalformedDER;
     const seq_len = try asn1.der.parse_length(reader);
@@ -199,7 +199,7 @@ pub const Certificate = struct {
 
     const CaptureState = struct {
         self: *Certificate,
-        allocator: *Allocator,
+        allocator: Allocator,
         dn_allocated: bool = false,
         pk_allocated: bool = false,
     };
@@ -266,7 +266,7 @@ pub const Certificate = struct {
     }
 
     /// Initialize a trusted anchor from distinguished encoding rules (DER) encoded data
-    pub fn create(allocator: *Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
+    pub fn create(allocator: Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
         var self: @This() = undefined;
         self.is_ca = false;
         // https://tools.ietf.org/html/rfc5280#page-117
@@ -323,7 +323,7 @@ pub const Certificate = struct {
         return self;
     }
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         alloc.free(self.dn);
         self.public_key.deinit(alloc);
     }
@@ -378,7 +378,7 @@ pub const Certificate = struct {
 pub const CertificateChain = struct {
     data: std.ArrayList(Certificate),
 
-    pub fn from_pem(allocator: *Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
+    pub fn from_pem(allocator: Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
         var self = @This(){ .data = std.ArrayList(Certificate).init(allocator) };
         errdefer self.deinit();
 
@@ -447,7 +447,7 @@ pub const ClientCertificateChain = struct {
     private_key: PrivateKey,
 
     // TODO: Encrypted private keys, non-RSA private keys
-    pub fn from_pem(allocator: *Allocator, pem_reader: anytype) !@This() {
+    pub fn from_pem(allocator: Allocator, pem_reader: anytype) !@This() {
         var it = PEMSectionIterator(@TypeOf(pem_reader), .{
             .section_names = &.{
                 "X.509 CERTIFICATE",
@@ -630,7 +630,7 @@ pub const ClientCertificateChain = struct {
         };
     }
 
-    pub fn deinit(self: *@This(), allocator: *Allocator) void {
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
         for (self.raw_certs[0..self.cert_len]) |cert_bytes| {
             allocator.free(cert_bytes);
         }
@@ -695,7 +695,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                 if (base64_idx == base64_buf.len) {
                     base64_idx = 0;
 
-                    const out_len = std.base64.standard_decoder.calcSizeForSlice(&base64_buf) catch
+                    const out_len = std.base64.standard.Decoder.calcSizeForSlice(&base64_buf) catch
                         return error.MalformedPEM;
 
                     const rest_chars = if (out_len > buf.len - out_idx)
@@ -705,7 +705,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                     const buf_chars = out_len - rest_chars;
 
                     var res_buffer: [3]u8 = undefined;
-                    std.base64.standard_decoder.decode(res_buffer[0..out_len], &base64_buf) catch
+                    std.base64.standard.Decoder.decode(res_buffer[0..out_len], &base64_buf) catch
                         return error.MalformedPEM;
 
                     var i: u3 = 0;
