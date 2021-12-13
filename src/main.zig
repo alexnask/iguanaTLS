@@ -588,7 +588,7 @@ const ServerCertificate = struct {
 
 const VerifierCaptureState = struct {
     list: std.ArrayListUnmanaged(ServerCertificate),
-    allocator: *Allocator,
+    allocator: Allocator,
     // Used in `add_server_cert` to avoid an extra allocation
     fbs: *std.io.FixedBufferStream([]const u8),
 };
@@ -642,7 +642,7 @@ fn cert_name_matches(cert_name: []const u8, hostname: []const u8) bool {
 }
 
 pub fn default_cert_verifier(
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     reader: anytype,
     certs_bytes: usize,
     trusted_certificates: []const x509.Certificate,
@@ -757,10 +757,10 @@ pub fn default_cert_verifier(
     return error.CertificateVerificationFailed;
 }
 
-pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: usize) !x509.PublicKey {
+pub fn extract_cert_public_key(allocator: Allocator, reader: anytype, length: usize) !x509.PublicKey {
     const CaptureState = struct {
         pub_key: x509.PublicKey,
-        allocator: *Allocator,
+        allocator: Allocator,
     };
     var capture_state = CaptureState{
         .pub_key = undefined,
