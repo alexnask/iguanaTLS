@@ -628,5 +628,5 @@ test "der.parse_value" {
     var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    _ = try der.parse_value(&arena.allocator, fbs.reader());
+    _ = try der.parse_value(arena.allocator(), fbs.reader());
 }
