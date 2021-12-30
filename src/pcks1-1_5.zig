@@ -128,7 +128,7 @@ pub fn sign(
     return allocator.resize(
         enc_buf.ptr[0 .. rsa_result.limbs.len * @sizeOf(usize)],
         signature_length,
-    ) catch unreachable;
+    );
 }
 
 pub fn verify_signature(
