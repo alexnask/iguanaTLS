@@ -1969,11 +1969,11 @@ test "HTTPS request on wikipedia main page" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2027,11 +2027,11 @@ test "HTTPS request on wikipedia alternate name" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2052,11 +2052,11 @@ test "HTTPS request on twitch oath2 endpoint" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .temp_allocator = std.testing.allocator,
         .reader = sock.reader(),
         .writer = sock.writer(),
@@ -2100,11 +2100,11 @@ test "Connecting to expired.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2129,11 +2129,11 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2158,11 +2158,11 @@ test "Connecting to self-signed.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2187,7 +2187,7 @@ test "Connecting to client.badssl.com with a client certificate" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client_cert = try x509.ClientCertificateChain.from_pem(
@@ -2197,7 +2197,7 @@ test "Connecting to client.badssl.com with a client certificate" {
     defer client_cert.deinit(std.testing.allocator);
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,

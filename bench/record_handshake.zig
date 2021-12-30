@@ -75,7 +75,7 @@ fn record_handshake(
     };
     std.log.info("Recording session `{s}`...", .{out_name});
     var client = try tls.client_connect(.{
-        .rand = &recording_random.rand,
+        .rand = recording_random.rand,
         .reader = reader,
         .writer = sock.writer(),
         .ciphersuites = ciphersuites,
