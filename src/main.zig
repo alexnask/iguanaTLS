@@ -796,7 +796,6 @@ pub fn extract_cert_public_key(allocator: Allocator, reader: anytype, length: us
             fn f(state: *CaptureState, tag: u8, _length: usize, subreader: anytype) !void {
                 _ = tag;
                 _ = _length;
-
                 state.pub_key = x509.parse_public_key(state.allocator, subreader) catch |err| switch (err) {
                     error.MalformedDER => return error.ServerMalformedResponse,
                     else => |e| return e,
@@ -827,7 +826,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -854,7 +853,7 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
@@ -880,7 +879,7 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        fn make_key_pair(rand: std.rand.Random) callconv(.Inline) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
@@ -940,7 +939,7 @@ pub const curves = struct {
         });
     }
 
-    fn make_key_pair(comptime list: anytype, curve_id: u16, rand: std.rand.Random) callconv(.Inline) KeyPair(list) {
+    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: std.rand.Random) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -1574,15 +1573,15 @@ pub fn client_connect(
             server_public_key_buf,
         );
 
-        const seed_len = 77; // extra len variable to workaround a bug
-        var seed: [seed_len]u8 = undefined;
+        const seedlen = 77;
+        var seed: [seedlen]u8 = undefined;
         seed[0..13].* = "master secret".*;
         seed[13..45].* = client_random;
         seed[45..77].* = server_random;
 
-        var a1: [32 + seed.len]u8 = undefined;
+        var a1: [32 + seedlen]u8 = undefined;
         Hmac256.create(a1[0..32], &seed, pre_master_secret);
-        var a2: [32 + seed.len]u8 = undefined;
+        var a2: [32 + seedlen]u8 = undefined;
         Hmac256.create(a2[0..32], a1[0..32], pre_master_secret);
 
         a1[32..].* = seed;
@@ -1605,8 +1604,8 @@ pub fn client_connect(
 
         const KeyExpansionState = struct {
             seed: *const [77]u8,
-            a1: *[32 + seed_len]u8,
-            a2: *[32 + seed_len]u8,
+            a1: *[32 + seedlen]u8,
+            a2: *[32 + seedlen]u8,
             master_secret: *const [48]u8,
         };
 
@@ -1970,7 +1969,7 @@ test "HTTPS request on wikipedia main page" {
     var rand_impl = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed);
+        break :blk &std.rand.DefaultCsprng.init(seed);
     };
     const rand = rand_impl.random();
 

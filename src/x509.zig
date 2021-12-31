@@ -518,7 +518,6 @@ pub const ClientCertificateChain = struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
                                 _ = reader;
-
                                 // TODO: Some way to get tag + length buffer directly in the capture callback?
                                 const encoded_length = asn1.der.encode_length(length).slice();
                                 const pos = _state.fbs.pos;
@@ -531,7 +530,6 @@ pub const ClientCertificateChain = struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
                                 _ = length;
-
                                 if (_state.dns.items.len == 1)
                                     _state.signature_algorithm.* = (try get_signature_algorithm(reader)) orelse
                                         return error.InvalidSignatureAlgorithm;
@@ -581,7 +579,6 @@ pub const ClientCertificateChain = struct {
                         struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
-
                                 _state.modulus.* = (try asn1.der.parse_int_with_length(
                                     _state.allocator,
                                     length,
@@ -593,7 +590,6 @@ pub const ClientCertificateChain = struct {
                         struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
-
                                 _state.exponent.* = (try asn1.der.parse_int_with_length(
                                     _state.allocator,
                                     length,

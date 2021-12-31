@@ -128,7 +128,8 @@ pub fn sign(
     return allocator.resize(
         enc_buf.ptr[0 .. rsa_result.limbs.len * @sizeOf(usize)],
         signature_length,
-    ) orelse unreachable;
+    // This 'orelse null' is unnecssary but it works around a bug in the compiler
+    ) orelse null;
 }
 
 pub fn verify_signature(
