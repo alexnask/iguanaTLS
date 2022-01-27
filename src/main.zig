@@ -1025,7 +1025,7 @@ pub fn client_connect(
 
     var client_random: [32]u8 = undefined;
     const rand = if (!@hasField(Options, "rand"))
-        std.crypto.random.*
+        std.crypto.random
     else
         options.rand;
 
