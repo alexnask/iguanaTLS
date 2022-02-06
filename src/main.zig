@@ -218,7 +218,7 @@ fn CertificateReader(comptime Reader: type) type {
 
 pub const CertificateVerifier = union(enum) {
     none,
-    function: anytype,
+    function: ?*const anyopaque,
     default,
 };
 
