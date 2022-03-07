@@ -588,7 +588,7 @@ const ServerCertificate = struct {
 
 const VerifierCaptureState = struct {
     list: std.ArrayListUnmanaged(ServerCertificate),
-    allocator: *Allocator,
+    allocator: Allocator,
     // Used in `add_server_cert` to avoid an extra allocation
     fbs: *std.io.FixedBufferStream([]const u8),
 };
@@ -642,7 +642,7 @@ fn cert_name_matches(cert_name: []const u8, hostname: []const u8) bool {
 }
 
 pub fn default_cert_verifier(
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     reader: anytype,
     certs_bytes: usize,
     trusted_certificates: []const x509.Certificate,
@@ -757,10 +757,10 @@ pub fn default_cert_verifier(
     return error.CertificateVerificationFailed;
 }
 
-pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: usize) !x509.PublicKey {
+pub fn extract_cert_public_key(allocator: Allocator, reader: anytype, length: usize) !x509.PublicKey {
     const CaptureState = struct {
         pub_key: x509.PublicKey,
-        allocator: *Allocator,
+        allocator: Allocator,
     };
     var capture_state = CaptureState{
         .pub_key = undefined,
@@ -796,7 +796,6 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
             fn f(state: *CaptureState, tag: u8, _length: usize, subreader: anytype) !void {
                 _ = tag;
                 _ = _length;
-
                 state.pub_key = x509.parse_public_key(state.allocator, subreader) catch |err| switch (err) {
                     error.MalformedDER => return error.ServerMalformedResponse,
                     else => |e| return e,
@@ -827,7 +826,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -854,7 +853,7 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
@@ -880,7 +879,7 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
@@ -940,7 +939,7 @@ pub const curves = struct {
         });
     }
 
-    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) KeyPair(list) {
+    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: std.rand.Random) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -1574,14 +1573,15 @@ pub fn client_connect(
             server_public_key_buf,
         );
 
-        var seed: [77]u8 = undefined;
+        const seedlen = 77;
+        var seed: [seedlen]u8 = undefined;
         seed[0..13].* = "master secret".*;
         seed[13..45].* = client_random;
         seed[45..77].* = server_random;
 
-        var a1: [32 + seed.len]u8 = undefined;
+        var a1: [32 + seedlen]u8 = undefined;
         Hmac256.create(a1[0..32], &seed, pre_master_secret);
-        var a2: [32 + seed.len]u8 = undefined;
+        var a2: [32 + seedlen]u8 = undefined;
         Hmac256.create(a2[0..32], a1[0..32], pre_master_secret);
 
         a1[32..].* = seed;
@@ -1604,8 +1604,8 @@ pub fn client_connect(
 
         const KeyExpansionState = struct {
             seed: *const [77]u8,
-            a1: *[32 + seed.len]u8,
-            a2: *[32 + seed.len]u8,
+            a1: *[32 + seedlen]u8,
+            a2: *[32 + seedlen]u8,
             master_secret: *const [48]u8,
         };
 
@@ -1754,7 +1754,7 @@ pub fn Client(
         server_seq: u64 = 1,
         key_data: ciphers.KeyData(_ciphersuites),
         read_state: ReadState = .none,
-        rand: *std.rand.Random,
+        rand: std.rand.Random,
 
         parent_reader: _Reader,
         parent_writer: _Writer,
@@ -1969,11 +1969,11 @@ test "HTTPS request on wikipedia main page" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2027,11 +2027,11 @@ test "HTTPS request on wikipedia alternate name" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2052,11 +2052,11 @@ test "HTTPS request on twitch oath2 endpoint" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .temp_allocator = std.testing.allocator,
         .reader = sock.reader(),
         .writer = sock.writer(),
@@ -2100,11 +2100,11 @@ test "Connecting to expired.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2129,11 +2129,11 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2158,11 +2158,11 @@ test "Connecting to self-signed.badssl.com returns an error" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     if (client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,
@@ -2187,7 +2187,7 @@ test "Connecting to client.badssl.com with a client certificate" {
     var rand = blk: {
         var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
         try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
+        break :blk &std.rand.DefaultCsprng.init(seed).random();
     };
 
     var client_cert = try x509.ClientCertificateChain.from_pem(
@@ -2197,7 +2197,7 @@ test "Connecting to client.badssl.com with a client certificate" {
     defer client_cert.deinit(std.testing.allocator);
 
     var client = try client_connect(.{
-        .rand = rand,
+        .rand = rand.*,
         .reader = sock.reader(),
         .writer = sock.writer(),
         .cert_verifier = .default,

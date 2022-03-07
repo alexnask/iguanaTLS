@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const BigInt = std.math.big.int.Const;
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -54,7 +55,7 @@ pub const Value = union(Tag) {
         number: u8,
     },
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         switch (self) {
             .int => |i| alloc.free(i.limbs),
             .bit_string => |bs| alloc.free(bs.data),
@@ -399,7 +400,7 @@ pub const der = struct {
                 enc.data[1 .. bytes_needed + 1],
                 mem.asBytes(&length)[0..bytes_needed],
             );
-            if (std.builtin.target.cpu.arch.endian() != .Big) {
+            if (builtin.target.cpu.arch.endian() != .Big) {
                 mem.reverse(u8, enc.data[1 .. bytes_needed + 1]);
             }
             enc.len = bytes_needed;
@@ -407,22 +408,22 @@ pub const der = struct {
         return enc;
     }
 
-    fn parse_int_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
+    fn parse_int_internal(alloc: Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
         const length = try parse_length_internal(bytes_read, der_reader);
         return try parse_int_with_length_internal(alloc, bytes_read, length, der_reader);
     }
 
-    pub fn parse_int(alloc: *Allocator, der_reader: anytype) !BigInt {
+    pub fn parse_int(alloc: Allocator, der_reader: anytype) !BigInt {
         var bytes: usize = undefined;
         return try parse_int_internal(alloc, &bytes, der_reader);
     }
 
-    pub fn parse_int_with_length(alloc: *Allocator, length: usize, der_reader: anytype) !BigInt {
+    pub fn parse_int_with_length(alloc: Allocator, length: usize, der_reader: anytype) !BigInt {
         var read: usize = 0;
         return try parse_int_with_length_internal(alloc, &read, length, der_reader);
     }
 
-    fn parse_int_with_length_internal(alloc: *Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
+    fn parse_int_with_length_internal(alloc: Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
         const first_byte = try der_reader.readByte();
         if (first_byte == 0x0 and length > 1) {
             // Positive number with highest bit set to 1 in the rest.
@@ -477,7 +478,7 @@ pub const der = struct {
         try der_reader.readNoEof(res_buf[0..length]);
         bytes_read.* += length;
 
-        if (std.builtin.target.cpu.arch.endian() != .Big) {
+        if (builtin.target.cpu.arch.endian() != .Big) {
             mem.reverse(u8, res_buf[0..length]);
         }
         return mem.bytesToValue(usize, &res_buf);
@@ -485,7 +486,7 @@ pub const der = struct {
 
     fn parse_value_with_tag_byte(
         tag_byte: u8,
-        alloc: *Allocator,
+        alloc: Allocator,
         bytes_read: *usize,
         der_reader: anytype,
     ) DecodeError(@TypeOf(der_reader))!Value {
@@ -608,13 +609,13 @@ pub const der = struct {
         }
     }
 
-    fn parse_value_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
+    fn parse_value_internal(alloc: Allocator, bytes_read: *usize, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
         const tag_byte = try der_reader.readByte();
         bytes_read.* += 1;
         return try parse_value_with_tag_byte(tag_byte, alloc, bytes_read, der_reader);
     }
 
-    pub fn parse_value(alloc: *Allocator, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
+    pub fn parse_value(alloc: Allocator, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
         var read: usize = 0;
         return try parse_value_internal(alloc, &read, der_reader);
     }
@@ -627,5 +628,5 @@ test "der.parse_value" {
     var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    _ = try der.parse_value(&arena.allocator, fbs.reader());
+    _ = try der.parse_value(arena.allocator(), fbs.reader());
 }

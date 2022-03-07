@@ -137,7 +137,7 @@ fn benchmark_run(
 
             timer.reset();
             _ = try tls.client_connect(.{
-                .rand = &rand.rand,
+                .rand = rand.rand,
                 .reader = reader,
                 .writer = writer,
                 .ciphersuites = ciphersuites,
@@ -177,7 +177,7 @@ fn benchmark_run(
 
             timer.reset();
             _ = try tls.client_connect(.{
-                .rand = &rand.rand,
+                .rand = rand.rand,
                 .reader = reader,
                 .writer = writer,
                 .ciphersuites = ciphersuites,
