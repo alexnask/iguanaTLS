@@ -3,5 +3,5 @@ name: iguanaTLS
 main: src/main.zig
 license: MIT
 description: Minimal, experimental TLS 1.2 implementation in Zig
-min_zig_version: 0.10.0-dev.531+3eb8d01f5
+min_zig_version: 0.10.0-dev.2802+54454fd01
 dependencies:

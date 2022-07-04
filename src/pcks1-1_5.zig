@@ -39,12 +39,12 @@ fn rsa_perform(
     while (curr_exponent.toConst().orderAgainstScalar(0) == .gt) {
         if (curr_exponent.isOdd()) {
             try result.ensureMulCapacity(result.toConst(), curr_base.toConst());
-            try result.mul(result.toConst(), curr_base.toConst());
+            try result.mul(&result, &curr_base);
             try llmod(&result, modulus);
         }
-        try curr_base.sqr(curr_base.toConst());
+        try curr_base.sqr(&curr_base);
         try llmod(&curr_base, modulus);
-        try curr_exponent.shiftRight(curr_exponent, 1);
+        try curr_exponent.shiftRight(&curr_exponent, 1);
     }
 
     if (result.limbs.len * @sizeOf(usize) < base.len)
@@ -56,7 +56,9 @@ fn rsa_perform(
 fn llmod(res: *std.math.big.int.Managed, n: std.math.big.int.Const) !void {
     var temp = try std.math.big.int.Managed.init(res.allocator);
     defer temp.deinit();
-    try temp.divTrunc(res, res.toConst(), n);
+    var tmpn = try n.toManaged(res.allocator);
+    defer tmpn.deinit();
+    try temp.divTrunc(res, res, &tmpn);
 }
 
 pub fn algorithm_prefix(signature_algorithm: SignatureAlgorithm) ?[]const u8 {
