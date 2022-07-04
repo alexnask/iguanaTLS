@@ -691,7 +691,9 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                 if (base64_idx == base64_buf.len) {
                     base64_idx = 0;
 
-                    const out_len = std.base64.standard_decoder.calcSizeForSlice(&base64_buf) catch
+                    const standard_decoder = std.base64.standard.Decoder;
+
+                    const out_len = standard_decoder.calcSizeForSlice(&base64_buf) catch
                         return error.MalformedPEM;
 
                     const rest_chars = if (out_len > buf.len - out_idx)
@@ -701,7 +703,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                     const buf_chars = out_len - rest_chars;
 
                     var res_buffer: [3]u8 = undefined;
-                    std.base64.standard_decoder.decode(res_buffer[0..out_len], &base64_buf) catch
+                    standard_decoder.decode(res_buffer[0..out_len], &base64_buf) catch
                         return error.MalformedPEM;
 
                     var i: u3 = 0;
