@@ -408,7 +408,6 @@ fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, rea
 
 fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     _ = tag;
-    _ = length;
 
     const start = state.fbs.pos;
 
@@ -525,7 +524,6 @@ fn set_signature_algorithm(state: *VerifierCaptureState, tag: u8, length: usize,
 
 fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     _ = tag;
-    _ = length;
 
     const unused_bits = try reader.readByte();
     const bit_count = (length - 1) * 8 - unused_bits;
