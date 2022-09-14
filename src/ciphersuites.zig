@@ -12,7 +12,7 @@ const RecordHeader = main.RecordHeader;
 pub const suites = struct {
     pub const ECDHE_RSA_Chacha20_Poly1305 = struct {
         pub const name = "ECDHE-RSA-CHACHA20-POLY1305";
-        pub const tag = 0xCCA8;
+        pub const tag = @as(u16, 0xCCA8);
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
         pub const prefix_data_length = 0;
@@ -160,7 +160,7 @@ pub const suites = struct {
 
     pub const ECDHE_RSA_AES128_GCM_SHA256 = struct {
         pub const name = "ECDHE-RSA-AES128-GCM-SHA256";
-        pub const tag = 0xC02F;
+        pub const tag = @as(u16, 0xC02F);
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
         pub const prefix_data_length = 8;

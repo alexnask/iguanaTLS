@@ -1032,7 +1032,7 @@ pub fn client_connect(
     rand.bytes(&client_random);
 
     var server_random: [32]u8 = undefined;
-    const ciphersuite_bytes = 2 * suites.len + 2;
+    const ciphersuite_bytes = 2 * @as(u16, suites.len) + 2;
     const alpn_bytes = if (has_alpn) blk: {
         var sum: usize = 0;
         for (options.protocols) |proto| {
@@ -1056,7 +1056,7 @@ pub fn client_connect(
             } ++ ([1]u8{undefined} ** 32) ++ [_]u8{
                 // Session ID
                 0x00,
-            } ++ mem.toBytes(@byteSwap(u16, ciphersuite_bytes));
+            } ++ mem.toBytes(@byteSwap(ciphersuite_bytes));
             // using .* = mem.asBytes(...).* or mem.writeIntBig didn't work...
 
             // Same as above, couldnt achieve this with a single buffer.
@@ -1069,7 +1069,7 @@ pub fn client_connect(
                 if (cs.hash != .sha256)
                     @compileError("Non SHA256 hash algorithm is not supported yet.");
 
-                ciphersuite_buf = ciphersuite_buf ++ mem.toBytes(@byteSwap(u16, cs.tag));
+                ciphersuite_buf = ciphersuite_buf ++ mem.toBytes(@byteSwap(cs.tag));
             }
 
             var ending_part: [13]u8 = [_]u8{
