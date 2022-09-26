@@ -919,7 +919,7 @@ pub const curves = struct {
     }
 
     fn KeyPair(comptime list: anytype) type {
-        var fields: [list.len]std.builtin.TypeInfo.UnionField = undefined;
+        var fields: [list.len]std.builtin.Type.UnionField = undefined;
         for (list) |curve, i| {
             fields[i] = .{
                 .name = curve.name,
@@ -932,7 +932,7 @@ pub const curves = struct {
                 .layout = .Extern,
                 .tag_type = null,
                 .fields = &fields,
-                .decls = &[0]std.builtin.TypeInfo.Declaration{},
+                .decls = &[0]std.builtin.Type.Declaration{},
             },
         });
     }

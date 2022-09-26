@@ -426,7 +426,7 @@ pub fn key_expansion(
 }
 
 pub fn InRecordState(comptime ciphersuites: anytype) type {
-    var fields: [ciphersuites.len]std.builtin.TypeInfo.UnionField = undefined;
+    var fields: [ciphersuites.len]std.builtin.Type.UnionField = undefined;
     for (ciphersuites) |cs, i| {
         fields[i] = .{
             .name = cs.name,
@@ -439,7 +439,7 @@ pub fn InRecordState(comptime ciphersuites: anytype) type {
             .layout = .Extern,
             .tag_type = null,
             .fields = &fields,
-            .decls = &[0]std.builtin.TypeInfo.Declaration{},
+            .decls = &[0]std.builtin.Type.Declaration{},
         },
     });
 }
