@@ -1087,7 +1087,7 @@ pub fn client_connect(
             break :blk starting_part ++ ciphersuite_buf ++ ending_part;
         };
 
-        var msg_buf = client_hello_start.ptr[0..client_hello_start.len].*;
+        var msg_buf = client_hello_start[0..client_hello_start.len].*;
         mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes + curvelist_bytes));
         mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x51 + ciphersuite_bytes + curvelist_bytes));
         mem.copy(u8, msg_buf[11..43], &client_random);
@@ -1767,6 +1767,15 @@ pub fn Client(
             return .{ .context = self };
         }
 
+        fn lenOverhead(self: *const @This()) u16 {
+            inline for (_ciphersuites) |cs| {
+                if (self.ciphersuite == cs.tag) {
+                    return cs.mac_length + cs.prefix_data_length;
+                }
+            }
+            unreachable;
+        }
+
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
             const buf_size = 1024;
 
@@ -1777,11 +1786,7 @@ pub fn Client(
                         else => |e| return e,
                     };
 
-                    const len_overhead = inline for (_ciphersuites) |cs| {
-                        if (self.ciphersuite == cs.tag) {
-                            break cs.mac_length + cs.prefix_data_length;
-                        }
-                    } else unreachable;
+                    const len_overhead = self.lenOverhead();
 
                     const rec_length = header.len();
                     if (rec_length < len_overhead)
@@ -1963,12 +1968,7 @@ test "HTTPS request on wikipedia main page" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2021,12 +2021,7 @@ test "HTTPS request on wikipedia alternate name" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2046,12 +2041,7 @@ test "HTTPS request on twitch oath2 endpoint" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "id.twitch.tv", 443);
     defer sock.close();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2094,12 +2084,7 @@ test "Connecting to expired.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2123,12 +2108,7 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2152,12 +2132,7 @@ test "Connecting to self-signed.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2181,17 +2156,10 @@ test "Connecting to client.badssl.com with a client certificate" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk std.rand.DefaultCsprng.init(seed).random();
-    };
+    const rand = std.crypto.random;
 
-    var client_cert = try x509.ClientCertificateChain.from_pem(
-        std.testing.allocator,
-        std.io.fixedBufferStream(@embedFile("../test/badssl.com-client.pem")).reader(),
-    );
+    var fbs2 = std.io.fixedBufferStream(@embedFile("../test/badssl.com-client.pem"));
+    var client_cert = try x509.ClientCertificateChain.from_pem(std.testing.allocator, fbs2.reader());
     defer client_cert.deinit(std.testing.allocator);
 
     var client = try client_connect(.{

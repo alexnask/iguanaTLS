@@ -8,6 +8,7 @@ pub fn build(b: *Builder) void {
 
     var main_tests = b.addTest("src/main.zig");
     main_tests.setBuildMode(mode);
+    main_tests.setMainPkgPath(".");
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
