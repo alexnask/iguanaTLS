@@ -911,7 +911,7 @@ pub const curves = struct {
     fn max_pre_master_secret_len(comptime list: anytype) usize {
         var max: usize = 0;
         for (list) |curve| {
-            const curr = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).field_type).Array.len;
+            const curr = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).type).Array.len;
             if (curr > max)
                 max = curr;
         }
@@ -923,13 +923,13 @@ pub const curves = struct {
         for (list) |curve, i| {
             fields[i] = .{
                 .name = curve.name,
-                .field_type = curve.Keys,
+                .type = curve.Keys,
                 .alignment = @alignOf(curve.Keys),
             };
         }
         return @Type(.{
             .Union = .{
-                .layout = .Extern,
+                .layout = .Auto,
                 .tag_type = null,
                 .fields = &fields,
                 .decls = &[0]std.builtin.Type.Declaration{},
@@ -1500,7 +1500,7 @@ pub fn client_connect(
 
     inline for (curvelist) |curve| {
         if (curve.tag == curve_id) {
-            const actual_len = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).field_type).Array.len;
+            const actual_len = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).type).Array.len;
             if (pub_key_len == actual_len + 1) {
                 try hashing_writer.writeByte(0x04);
             } else {

@@ -308,10 +308,10 @@ fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
         return null;
 
     const field_info = std.meta.fieldInfo(T, field);
-    if (!comptime std.meta.trait.is(.Array)(field_info.field_type) or std.meta.Elem(field_info.field_type) != u8)
+    if (!comptime std.meta.trait.is(.Array)(field_info.type) or std.meta.Elem(field_info.type) != u8)
         @compileError("Field '" ++ field ++ "' of type '" ++ @typeName(T) ++ "' should be an array of u8.");
 
-    return @typeInfo(field_info.field_type).Array.len;
+    return @typeInfo(field_info.type).Array.len;
 }
 
 pub fn key_data_size(comptime ciphersuites: anytype) usize {
@@ -430,13 +430,13 @@ pub fn InRecordState(comptime ciphersuites: anytype) type {
     for (ciphersuites) |cs, i| {
         fields[i] = .{
             .name = cs.name,
-            .field_type = cs.State,
+            .type = cs.State,
             .alignment = if (@sizeOf(cs.State) > 0) @alignOf(cs.State) else 0,
         };
     }
     return @Type(.{
         .Union = .{
-            .layout = .Extern,
+            .layout = .Auto,
             .tag_type = null,
             .fields = &fields,
             .decls = &[0]std.builtin.Type.Declaration{},
