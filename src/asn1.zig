@@ -600,8 +600,8 @@ pub const der = struct {
                 bytes_read.* += length;
 
                 return @as(Value, switch (tag) {
-                    .sequence => .{ .sequence = arr.toOwnedSlice() },
-                    .set => .{ .set = arr.toOwnedSlice() },
+                    .sequence => .{ .sequence = try arr.toOwnedSlice() },
+                    .set => .{ .set = try arr.toOwnedSlice() },
                     else => unreachable,
                 });
             },
