@@ -475,7 +475,7 @@ pub const ClientCertificateChain = struct {
 
         while (try it.next()) |state_and_reader| {
             switch (state_and_reader.state) {
-                .@"X.509 CERTIFICATE", .@"CERTIFICATE" => {
+                .@"X.509 CERTIFICATE", .CERTIFICATE => {
                     const cert_bytes = try state_and_reader.reader.readAllAlloc(allocator, std.math.maxInt(usize));
                     errdefer allocator.free(cert_bytes);
                     try raw_certs.append(allocator, cert_bytes);
@@ -741,7 +741,7 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
     var fields: [options.section_names.len + 2]std.builtin.Type.EnumField = undefined;
     fields[0] = .{ .name = "none", .value = 0 };
     fields[1] = .{ .name = "other", .value = 1 };
-    for (fields[2..]) |*field, idx| {
+    for (fields[2..], 0..) |*field, idx| {
         field.name = options.section_names[idx];
         field.value = @as(u8, idx + 2);
         if (field.name.len > biggest_name_len)
@@ -805,7 +805,7 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
                                         '-' => {
                                             try self.reader.skipUntilDelimiterOrEof('\n');
                                             const name = name_buf[0..name_char_idx];
-                                            for (options.section_names) |sec_name, idx| {
+                                            for (options.section_names, 0..) |sec_name, idx| {
                                                 if (mem.eql(u8, sec_name, name)) {
                                                     self.state = @intToEnum(StateEnum, @intCast(u8, idx + 2));
                                                     return StateAndName{

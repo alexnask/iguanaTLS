@@ -112,7 +112,7 @@ pub const ChaCha20Stream = struct {
         mac.final(computedTag[0..]);
 
         var acc: u8 = 0;
-        for (computedTag) |_, i| {
+        for (computedTag, 0..) |_, i| {
             acc |= computedTag[i] ^ tag[i];
         }
         if (acc != 0) {
@@ -742,7 +742,7 @@ pub const ecc = struct {
     }
 
     fn CCOPY(ctl: u32, dst: []u8, src: []const u8) void {
-        for (src) |s, i| {
+        for (src, 0..) |s, i| {
             dst[i] = @truncate(u8, MUX(ctl, s, dst[i]));
         }
     }

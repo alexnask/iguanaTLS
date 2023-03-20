@@ -35,7 +35,7 @@ pub const suites = struct {
             const len = header.len() - 16;
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
             mem.writeIntBig(u64, nonce[4..12], server_seq);
-            for (nonce) |*n, i| {
+            for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.server_iv(@This())[i];
             }
 
@@ -115,7 +115,7 @@ pub const suites = struct {
 
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
             mem.writeIntBig(u64, nonce[4..12], seq);
-            for (nonce) |*n, i| {
+            for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.client_iv(@This())[i];
             }
 
@@ -427,7 +427,7 @@ pub fn key_expansion(
 
 pub fn InRecordState(comptime ciphersuites: anytype) type {
     var fields: [ciphersuites.len]std.builtin.Type.UnionField = undefined;
-    for (ciphersuites) |cs, i| {
+    for (ciphersuites, 0..) |cs, i| {
         fields[i] = .{
             .name = cs.name,
             .type = cs.State,
