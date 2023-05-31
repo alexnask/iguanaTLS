@@ -40,7 +40,7 @@ pub const Value = union(Tag) {
     int: BigInt,
     bit_string: BitString,
     octet_string: []const u8,
-    @"null",
+    null,
     // @TODO Make this []u32, owned?
     object_identifier: ObjectIdentifier,
     utf8_string: []const u8,
@@ -119,7 +119,7 @@ pub const Value = union(Tag) {
                 try writer.writeByte('\n');
             },
             .octet_string => |s| try writer.print("OCTET STRING ({} bytes) {X}\n", .{ s.len, s }),
-            .@"null" => try writer.writeAll("NULL\n"),
+            .null => try writer.writeAll("NULL\n"),
             .object_identifier => |oid| {
                 try writer.writeAll("OBJECT IDENTIFIER ");
                 var i: u8 = 0;
@@ -429,7 +429,7 @@ pub const der = struct {
             // Positive number with highest bit set to 1 in the rest.
             const limb_count = std.math.divCeil(usize, length - 1, @sizeOf(usize)) catch unreachable;
             const limbs = try alloc.alloc(usize, limb_count);
-            std.mem.set(usize, limbs, 0);
+            @memset(limbs, 0);
             errdefer alloc.free(limbs);
 
             var limb_ptr = @ptrCast([*]u8, limbs.ptr);
@@ -445,7 +445,7 @@ pub const der = struct {
         // Twos complement
         const limb_count = std.math.divCeil(usize, length, @sizeOf(usize)) catch unreachable;
         const limbs = try alloc.alloc(usize, limb_count);
-        std.mem.set(usize, limbs, 0);
+        @memset(limbs, 0);
         errdefer alloc.free(limbs);
 
         var limb_ptr = @ptrCast([*]u8, limbs.ptr);
@@ -541,9 +541,9 @@ pub const der = struct {
                     else => unreachable,
                 });
             },
-            .@"null" => {
+            .null => {
                 std.debug.assert((try parse_length_internal(bytes_read, der_reader)) == 0x00);
-                return .@"null";
+                return .null;
             },
             .object_identifier => {
                 const length = try parse_length_internal(bytes_read, der_reader);

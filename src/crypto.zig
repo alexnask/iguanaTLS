@@ -749,7 +749,7 @@ pub const ecc = struct {
 
     inline fn set_zero(out: [*]u32, bit_len: u32) void {
         out[0] = bit_len;
-        mem.set(u32, (out + 1)[0 .. (bit_len + 31) >> 5], 0);
+        @memset((out + 1)[0 .. (bit_len + 31) >> 5], 0);
     }
 
     fn divrem(_hi: u32, _lo: u32, d: u32, r: *u32) u32 {
