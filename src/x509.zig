@@ -642,7 +642,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
         fn f(it: *PEMSectionIterator(Reader, options), buf: []u8) Error!usize {
             var out_idx: usize = 0;
             if (it.waiting_chars_len > 0) {
-                const rest_written = std.math.min(it.waiting_chars_len, buf.len);
+                const rest_written = @min(it.waiting_chars_len, buf.len);
                 while (out_idx < rest_written) : (out_idx += 1) {
                     buf[out_idx] = it.waiting_chars[out_idx];
                 }
@@ -714,7 +714,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
 
                     if (rest_chars > 0) {
                         mem.copy(u8, &it.waiting_chars, res_buffer[i..]);
-                        it.waiting_chars_len = @intCast(u2, rest_chars);
+                        it.waiting_chars_len = @intCast(rest_chars);
                     }
                     if (out_idx == buf.len)
                         return out_idx;
@@ -807,7 +807,7 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
                                             const name = name_buf[0..name_char_idx];
                                             for (options.section_names, 0..) |sec_name, idx| {
                                                 if (mem.eql(u8, sec_name, name)) {
-                                                    self.state = @intToEnum(StateEnum, @intCast(u8, idx + 2));
+                                                    self.state = @enumFromInt(idx + 2);
                                                     return StateAndName{
                                                         .reader = .{ .context = self },
                                                         .state = self.state,

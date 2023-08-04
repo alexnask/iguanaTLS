@@ -103,12 +103,12 @@ pub const suites = struct {
 
             std.debug.assert(buffer.len <= buffer_size);
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @intCast(u16, buffer.len + 16));
+            try writer.writeIntBig(u16, @as(u16, @intCast(buffer.len + 16)));
 
             var additional_data: [13]u8 = undefined;
             mem.writeIntBig(u64, additional_data[0..8], seq);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
+            mem.writeIntBig(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)));
 
             var encrypted_data: [buffer_size]u8 = undefined;
             var tag_data: [16]u8 = undefined;
@@ -278,10 +278,10 @@ pub const suites = struct {
             var additional_data: [13]u8 = undefined;
             mem.writeIntBig(u64, additional_data[0..8], seq);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
+            mem.writeIntBig(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)));
 
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @intCast(u16, buffer.len + 24));
+            try writer.writeIntBig(u16, @as(u16, @intCast(buffer.len + 24)));
             try writer.writeAll(iv[4..12]);
 
             var encrypted_data: [buffer_size]u8 = undefined;
@@ -401,8 +401,8 @@ pub fn key_expansion(
                     chunk_cursor = 0;
                 }
 
-                const field_width = comptime (key_field_width(cs.Keys, field) orelse 0);
-                const first_read = comptime std.math.min(32 - chunk_cursor, field_width);
+                const field_width: usize = comptime (key_field_width(cs.Keys, field) orelse 0);
+                const first_read: usize = comptime @min(32 - chunk_cursor, field_width);
                 const second_read = field_width - first_read;
 
                 res.data[data_cursor..][0..first_read].* = chunk[chunk_cursor..][0..first_read].*;

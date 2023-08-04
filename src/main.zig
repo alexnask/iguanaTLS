@@ -206,7 +206,7 @@ fn CertificateReaderState(comptime Reader: type) type {
 fn CertificateReader(comptime Reader: type) type {
     const S = struct {
         pub fn read(state: *CertificateReaderState(Reader), buffer: []u8) Reader.Error!usize {
-            const out_bytes = std.math.min(buffer.len, state.length - state.idx);
+            const out_bytes = @min(buffer.len, state.length - state.idx);
             const res = try state.reader.readAll(buffer[0..out_bytes]);
             state.idx += res;
             return res;
@@ -427,13 +427,13 @@ fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, read
     switch (data[3]) {
         17 => {
             const san_tag = try reader.readByte();
-            if (san_tag != @enumToInt(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
+            if (san_tag != @intFromEnum(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
 
             const san_length = try asn1.der.parse_length(reader);
             _ = san_length;
 
             const body_tag = try reader.readByte();
-            if (body_tag != @enumToInt(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
+            if (body_tag != @intFromEnum(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
 
             const body_length = try asn1.der.parse_length(reader);
             const total_read = state.fbs.pos - start;
@@ -575,7 +575,7 @@ const ServerCertificate = struct {
                 const start = self.pos + 2;
                 const end = start + len;
                 self.pos = end;
-                if (@enumToInt(self.choice) == choice - 0x80) {
+                if (@intFromEnum(self.choice) == choice - 0x80) {
                     return self.cert.raw_subject_alternative_name[start..end];
                 }
             }
@@ -1088,24 +1088,24 @@ pub fn client_connect(
         };
 
         var msg_buf = client_hello_start[0..client_hello_start.len].*;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes + curvelist_bytes));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x51 + ciphersuite_bytes + curvelist_bytes));
+        mem.writeIntBig(u16, msg_buf[3..5], @as(u16, @intCast(alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes + curvelist_bytes)));
+        mem.writeIntBig(u24, msg_buf[6..9], @as(u24, @intCast(alpn_bytes + hostname.len + 0x51 + ciphersuite_bytes + curvelist_bytes)));
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, alpn_bytes + hostname.len + 0x28 + curvelist_bytes));
-        mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 5));
-        mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 3));
-        mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len));
+        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(alpn_bytes + hostname.len + 0x28 + curvelist_bytes)));
+        mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len + 5)));
+        mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len + 3)));
+        mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len)));
         try writer.writeAll(msg_buf[0..5]);
         try hashing_writer.writeAll(msg_buf[5..]);
     }
     try hashing_writer.writeAll(hostname);
     if (has_alpn) {
         var msg_buf = [6]u8{ 0x00, 0x10, undefined, undefined, undefined, undefined };
-        mem.writeIntBig(u16, msg_buf[2..4], @intCast(u16, alpn_bytes - 4));
-        mem.writeIntBig(u16, msg_buf[4..6], @intCast(u16, alpn_bytes - 6));
+        mem.writeIntBig(u16, msg_buf[2..4], @as(u16, @intCast(alpn_bytes - 4)));
+        mem.writeIntBig(u16, msg_buf[4..6], @as(u16, @intCast(alpn_bytes - 6)));
         try hashing_writer.writeAll(&msg_buf);
         for (options.protocols) |proto| {
-            try hashing_writer.writeByte(@intCast(u8, proto.len));
+            try hashing_writer.writeByte(@intCast(proto.len));
             try hashing_writer.writeAll(proto);
         }
     }
@@ -1118,8 +1118,8 @@ pub fn client_connect(
             undefined, undefined,
         };
 
-        mem.writeIntBig(u16, msg_buf[2..4], @intCast(u16, curvelist_bytes + 2));
-        mem.writeIntBig(u16, msg_buf[4..6], @intCast(u16, curvelist_bytes));
+        mem.writeIntBig(u16, msg_buf[2..4], @as(u16, @intCast(curvelist_bytes + 2)));
+        mem.writeIntBig(u16, msg_buf[4..6], @as(u16, @intCast(curvelist_bytes)));
         try hashing_writer.writeAll(&msg_buf);
 
         inline for (curvelist) |curve| {
@@ -1399,8 +1399,8 @@ pub fn client_connect(
                     var signature_algorithm: [2]u8 = undefined;
                     try hashing_reader.readNoEof(&signature_algorithm);
                     for (options.client_certificates) |*cert_chain| {
-                        if (@enumToInt(cert_chain.signature_algorithm.hash) == signature_algorithm[0] and
-                            @enumToInt(cert_chain.signature_algorithm.signature) == signature_algorithm[1])
+                        if (@intFromEnum(cert_chain.signature_algorithm.hash) == signature_algorithm[0] and
+                            @intFromEnum(cert_chain.signature_algorithm.signature) == signature_algorithm[1])
                         {
                             try chosen_client_certificates.append(options.temp_allocator, cert_chain);
                         }
@@ -1468,19 +1468,19 @@ pub fn client_connect(
                 const certificate_count = client_certificate.?.cert_len;
                 // 7 bytes for the record type tag (1), record length (3), certificate list length (3)
                 // 3 bytes for each certificate length
-                var total_len: u24 = 7 + 3 * @intCast(u24, certificate_count);
+                var total_len = 7 + 3 * @as(u24, @intCast(certificate_count));
                 var i: usize = 0;
                 while (i < certificate_count) : (i += 1) {
-                    total_len += @intCast(u24, client_certificate.?.raw_certs[i].len);
+                    total_len += @intCast(client_certificate.?.raw_certs[i].len);
                 }
-                try writer.writeIntBig(u16, @intCast(u16, total_len));
+                try writer.writeIntBig(u16, @as(u16, @intCast(total_len)));
                 var msg_buf: [7]u8 = [1]u8{0x0b} ++ ([1]u8{undefined} ** 6);
                 mem.writeIntBig(u24, msg_buf[1..4], total_len - 4);
                 mem.writeIntBig(u24, msg_buf[4..7], total_len - 7);
                 try hashing_writer.writeAll(&msg_buf);
                 i = 0;
                 while (i < certificate_count) : (i += 1) {
-                    try hashing_writer.writeIntBig(u24, @intCast(u24, client_certificate.?.raw_certs[i].len));
+                    try hashing_writer.writeIntBig(u24, @as(u24, @intCast(client_certificate.?.raw_certs[i].len)));
                     try hashing_writer.writeAll(client_certificate.?.raw_certs[i]);
                 }
             } else {
@@ -1547,12 +1547,12 @@ pub fn client_connect(
             defer options.temp_allocator.free(signed);
 
             try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
-            try writer.writeIntBig(u16, @intCast(u16, signed.len + 8));
+            try writer.writeIntBig(u16, @intCast(signed.len + 8));
             var msg_buf: [8]u8 = [1]u8{0x0F} ++ ([1]u8{undefined} ** 7);
-            mem.writeIntBig(u24, msg_buf[1..4], @intCast(u24, signed.len + 4));
-            msg_buf[4] = @enumToInt(client_cert.signature_algorithm.hash);
-            msg_buf[5] = @enumToInt(client_cert.signature_algorithm.signature);
-            mem.writeIntBig(u16, msg_buf[6..8], @intCast(u16, signed.len));
+            mem.writeIntBig(u24, msg_buf[1..4], @intCast(signed.len + 4));
+            msg_buf[4] = @intFromEnum(client_cert.signature_algorithm.hash);
+            msg_buf[5] = @intFromEnum(client_cert.signature_algorithm.signature);
+            mem.writeIntBig(u16, msg_buf[6..8], @intCast(signed.len));
             try hashing_writer.writeAll(&msg_buf);
             try hashing_writer.writeAll(signed);
         }
@@ -1853,7 +1853,7 @@ pub fn Client(
                             return 0;
                         return alert_byte_to_error(result[1]);
                     } else if (header.tag() == 0x17) {
-                        const curr_bytes = std.math.min(std.math.min(len, buf_size), buffer.len);
+                        const curr_bytes = @min(@min(len, buf_size), buffer.len);
                         // Partially decrypt the data.
                         var encrypted: [buf_size]u8 = undefined;
                         const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
@@ -1884,7 +1884,7 @@ pub fn Client(
                     } else unreachable;
                 },
                 .in_record => |*in_record| {
-                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), in_record.record_length - in_record.index);
+                    const curr_bytes = @min(@min(buf_size, buffer.len), in_record.record_length - in_record.index);
                     // Partially decrypt the data.
                     var encrypted: [buf_size]u8 = undefined;
                     const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
@@ -1922,7 +1922,7 @@ pub fn Client(
             inline for (_ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
                     // @TODO Make this buffer size configurable
-                    const curr_bytes = @truncate(u16, std.math.min(buffer.len, 1024));
+                    const curr_bytes: u16 = @min(buffer.len, 1024);
                     try cs.raw_write(
                         1024,
                         self.rand,
