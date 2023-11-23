@@ -111,10 +111,10 @@ pub fn sign(
     // EM = 0x00 || 0x01 || PS || 0x00 || T
     sig_buf[0] = 0;
     sig_buf[1] = 1;
-    mem.set(u8, sig_buf[2 .. first_prefix_idx - 1], 0xff);
+    @memset(sig_buf[2 .. first_prefix_idx - 1], 0xff);
     sig_buf[first_prefix_idx - 1] = 0;
-    mem.copy(u8, sig_buf[first_prefix_idx..first_hash_idx], prefix);
-    mem.copy(u8, sig_buf[first_hash_idx..], hash);
+    @memcpy(sig_buf[first_prefix_idx..first_hash_idx], prefix);
+    @memcpy(sig_buf[first_hash_idx..], hash);
 
     const modulus = std.math.big.int.Const{ .limbs = private_key.rsa.modulus, .positive = true };
     const exponent = std.math.big.int.Const{ .limbs = private_key.rsa.exponent, .positive = true };
@@ -127,10 +127,26 @@ pub fn sign(
 
     const enc_buf = @as([*]u8, @ptrCast(rsa_result.limbs.ptr))[0..signature_length];
     mem.reverse(u8, enc_buf);
-    return allocator.resize(
+    return resize(
+        allocator,
         enc_buf.ptr[0 .. rsa_result.limbs.len * @sizeOf(usize)],
         signature_length,
     ) orelse unreachable;
+}
+
+fn resize(self: Allocator, old_mem: anytype, new_n: usize) ?@TypeOf(old_mem) {
+    const Slice = @typeInfo(@TypeOf(old_mem)).Pointer;
+    const T = Slice.child;
+    if (new_n == 0) {
+        self.free(old_mem);
+        return &[0]T{};
+    }
+    const old_byte_slice = mem.sliceAsBytes(old_mem);
+    const new_byte_count = std.math.mul(usize, @sizeOf(T), new_n) catch return null;
+    const rc = self.rawResize(old_byte_slice, Slice.alignment, new_byte_count, @returnAddress());
+    if (!rc) return null;
+    const new_byte_slice = old_byte_slice.ptr[0..new_byte_count];
+    return mem.bytesAsSlice(T, new_byte_slice);
 }
 
 pub fn verify_signature(

@@ -1547,12 +1547,12 @@ pub fn client_connect(
             defer options.temp_allocator.free(signed);
 
             try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
-            try writer.writeIntBig(u16, @intCast(signed.len + 8));
+            try writer.writeIntBig(u16, @as(u16, @intCast(signed.len + 8)));
             var msg_buf: [8]u8 = [1]u8{0x0F} ++ ([1]u8{undefined} ** 7);
-            mem.writeIntBig(u24, msg_buf[1..4], @intCast(signed.len + 4));
+            mem.writeIntBig(u24, msg_buf[1..4], @as(u24, @intCast(signed.len + 4)));
             msg_buf[4] = @intFromEnum(client_cert.signature_algorithm.hash);
             msg_buf[5] = @intFromEnum(client_cert.signature_algorithm.signature);
-            mem.writeIntBig(u16, msg_buf[6..8], @intCast(signed.len));
+            mem.writeIntBig(u16, msg_buf[6..8], @as(u16, @intCast(signed.len)));
             try hashing_writer.writeAll(&msg_buf);
             try hashing_writer.writeAll(signed);
         }
@@ -1987,7 +1987,7 @@ test "HTTPS request on wikipedia main page" {
 
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-        try std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.spaces));
+        try std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.whitespace));
         std.testing.allocator.free(header);
     }
 
@@ -1997,7 +1997,7 @@ test "HTTPS request on wikipedia main page" {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
         defer std.testing.allocator.free(header);
 
-        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        const hdr_contents = mem.trim(u8, header, &std.ascii.whitespace);
         if (hdr_contents.len == 0) {
             break :hdr_loop;
         }
@@ -2060,7 +2060,7 @@ test "HTTPS request on twitch oath2 endpoint" {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
         defer std.testing.allocator.free(header);
 
-        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        const hdr_contents = mem.trim(u8, header, &std.ascii.whitespace);
         if (hdr_contents.len == 0) {
             break :hdr_loop;
         }

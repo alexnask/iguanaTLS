@@ -989,7 +989,7 @@ test "elliptic curve functions with secp384r1 curve" {
         try std.testing.expectEqual(ecc.SECP384R1.base_point, out);
 
         // Multiply by one, check that the result is still the base point
-        mem.set(u8, &out, 0);
+        @memset(&out, 0);
         ecc.point_mul(ecc.SECP384R1, &P, &[1]u8{1});
         ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
         try std.testing.expectEqual(ecc.SECP384R1.base_point, out);

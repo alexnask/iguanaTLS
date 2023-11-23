@@ -619,8 +619,8 @@ pub const ClientCertificateChain = struct {
         std.debug.assert(cert_issuer_dns.items.len == raw_certs.items.len);
         return @This(){
             .cert_len = raw_certs.items.len,
-            .raw_certs = raw_certs.toOwnedSlice(allocator).ptr,
-            .cert_issuer_dns = cert_issuer_dns.toOwnedSlice().ptr,
+            .raw_certs = (try raw_certs.toOwnedSlice(allocator)).ptr,
+            .cert_issuer_dns = (try cert_issuer_dns.toOwnedSlice()).ptr,
             .signature_algorithm = signature_algorithm,
             .private_key = private_key.?,
         };
@@ -750,7 +750,6 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
 
     const StateEnum = @Type(.{
         .Enum = .{
-            .layout = .Auto,
             .tag_type = u8,
             .fields = &fields,
             .decls = &.{},
