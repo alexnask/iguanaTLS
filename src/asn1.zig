@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const BigInt = std.math.big.int.Const;
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -39,7 +40,7 @@ pub const Value = union(Tag) {
     int: BigInt,
     bit_string: BitString,
     octet_string: []const u8,
-    @"null",
+    null,
     // @TODO Make this []u32, owned?
     object_identifier: ObjectIdentifier,
     utf8_string: []const u8,
@@ -54,7 +55,7 @@ pub const Value = union(Tag) {
         number: u8,
     },
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         switch (self) {
             .int => |i| alloc.free(i.limbs),
             .bit_string => |bs| alloc.free(bs.data),
@@ -96,7 +97,7 @@ pub const Value = union(Tag) {
             },
             .bit_string => |bs| {
                 try writer.print("BIT STRING ({} bits) ", .{bs.bit_len});
-                const bits_to_show = std.math.min(8 * 3, bs.bit_len);
+                const bits_to_show = @min(8 * 3, bs.bit_len);
                 const bytes = std.math.divCeil(usize, bits_to_show, 8) catch unreachable;
 
                 var bit_idx: usize = 0;
@@ -106,7 +107,7 @@ pub const Value = union(Tag) {
                     var cur_bit_idx: u3 = 0;
                     while (bit_idx < bits_to_show) {
                         const mask = @as(u8, 0x80) >> cur_bit_idx;
-                        try writer.print("{}", .{@boolToInt(byte & mask == mask)});
+                        try writer.print("{}", .{@intFromBool(byte & mask == mask)});
                         cur_bit_idx += 1;
                         bit_idx += 1;
                         if (cur_bit_idx == 7)
@@ -118,7 +119,7 @@ pub const Value = union(Tag) {
                 try writer.writeByte('\n');
             },
             .octet_string => |s| try writer.print("OCTET STRING ({} bytes) {X}\n", .{ s.len, s }),
-            .@"null" => try writer.writeAll("NULL\n"),
+            .null => try writer.writeAll("NULL\n"),
             .object_identifier => |oid| {
                 try writer.writeAll("OBJECT IDENTIFIER ");
                 var i: u8 = 0;
@@ -134,7 +135,7 @@ pub const Value = union(Tag) {
             .utc_time => |s| try writer.print("UTC TIME {}\n", .{s}),
             .bmp_string => |s| try writer.print("BMP STRING ({} words) {}\n", .{
                 s.len,
-                @ptrCast([*]const u16, s.ptr)[0 .. s.len * 2],
+                @as([*]const u16, @ptrCast(s.ptr))[0 .. s.len * 2],
             }),
             .sequence => |children| {
                 try writer.print("SEQUENCE ({} elems)\n", .{children.len});
@@ -180,7 +181,7 @@ pub const der = struct {
     fn DERReader(comptime Reader: type) type {
         const S = struct {
             pub fn read(state: *DERReaderState(Reader), buffer: []u8) DecodeError(Reader)!usize {
-                const out_bytes = std.math.min(buffer.len, state.length - state.idx);
+                const out_bytes = @min(buffer.len, state.length - state.idx);
                 const res = try state.der_reader.readAll(buffer[0..out_bytes]);
                 state.idx += res;
                 return res;
@@ -230,7 +231,7 @@ pub const der = struct {
     ) !?TagLength {
         const Reader = @TypeOf(der_reader);
 
-        const isEnumLit = comptime std.meta.trait.is(.EnumLiteral);
+        const isEnumLit = comptime is(.EnumLiteral);
         comptime var tag_idx = 0;
 
         const has_capture = comptime isEnumLit(@TypeOf(schema[tag_idx])) and schema[tag_idx] == .capture;
@@ -249,7 +250,7 @@ pub const der = struct {
 
         const length = existing_length orelse try parse_length(der_reader);
         if (tag_literal == .sequence_of) {
-            if (tag_byte != @enumToInt(Tag.sequence)) {
+            if (tag_byte != @intFromEnum(Tag.sequence)) {
                 if (is_optional) return TagLength{ .tag = tag_byte, .length = length };
                 return error.InvalidTag;
             }
@@ -293,7 +294,7 @@ pub const der = struct {
                 .idx = 0,
                 .length = length,
             };
-            var reader = DERReader(@TypeOf(der_reader)){ .context = &reader_state };
+            const reader = DERReader(@TypeOf(der_reader)){ .context = &reader_state };
             const capture_context = captures[schema[1] * 2];
             const capture_action = captures[schema[1] * 2 + 1];
             try capture_action(capture_context, tag_byte, length, reader);
@@ -318,7 +319,7 @@ pub const der = struct {
                     .idx = 0,
                     .length = length,
                 };
-                var reader = DERReader(Reader){ .context = &reader_state };
+                const reader = DERReader(Reader){ .context = &reader_state };
                 const capture_context = captures[schema[1] * 2];
                 const capture_action = captures[schema[1] * 2 + 1];
                 try capture_action(capture_context, tag_byte, length, reader);
@@ -351,7 +352,7 @@ pub const der = struct {
                 .idx = 0,
                 .length = length,
             };
-            var reader = DERReader(Reader){ .context = &reader_state };
+            const reader = DERReader(Reader){ .context = &reader_state };
             const capture_context = captures[schema[1] * 2];
             const capture_action = captures[schema[1] * 2 + 1];
             try capture_action(capture_context, tag_byte, length, reader);
@@ -385,21 +386,13 @@ pub const der = struct {
     pub fn encode_length(length: usize) EncodedLength {
         var enc = EncodedLength{ .data = undefined, .len = 0 };
         if (length < 128) {
-            enc.data[0] = @truncate(u8, length);
+            enc.data[0] = @truncate(length);
             enc.len = 1;
         } else {
-            const bytes_needed = @intCast(u8, std.math.divCeil(
-                usize,
-                std.math.log2_int_ceil(usize, length),
-                8,
-            ) catch unreachable);
+            const bytes_needed: u8 = @intCast(std.math.divCeil(usize, std.math.log2_int_ceil(usize, length), 8) catch unreachable);
             enc.data[0] = bytes_needed | 0x80;
-            mem.copy(
-                u8,
-                enc.data[1 .. bytes_needed + 1],
-                mem.asBytes(&length)[0..bytes_needed],
-            );
-            if (std.builtin.target.cpu.arch.endian() != .Big) {
+            mem.copy(u8, enc.data[1 .. bytes_needed + 1], mem.asBytes(&length)[0..bytes_needed]);
+            if (builtin.target.cpu.arch.endian() != .big) {
                 mem.reverse(u8, enc.data[1 .. bytes_needed + 1]);
             }
             enc.len = bytes_needed;
@@ -407,31 +400,31 @@ pub const der = struct {
         return enc;
     }
 
-    fn parse_int_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
+    fn parse_int_internal(alloc: Allocator, bytes_read: *usize, der_reader: anytype) !BigInt {
         const length = try parse_length_internal(bytes_read, der_reader);
         return try parse_int_with_length_internal(alloc, bytes_read, length, der_reader);
     }
 
-    pub fn parse_int(alloc: *Allocator, der_reader: anytype) !BigInt {
+    pub fn parse_int(alloc: Allocator, der_reader: anytype) !BigInt {
         var bytes: usize = undefined;
         return try parse_int_internal(alloc, &bytes, der_reader);
     }
 
-    pub fn parse_int_with_length(alloc: *Allocator, length: usize, der_reader: anytype) !BigInt {
+    pub fn parse_int_with_length(alloc: Allocator, length: usize, der_reader: anytype) !BigInt {
         var read: usize = 0;
         return try parse_int_with_length_internal(alloc, &read, length, der_reader);
     }
 
-    fn parse_int_with_length_internal(alloc: *Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
+    fn parse_int_with_length_internal(alloc: Allocator, bytes_read: *usize, length: usize, der_reader: anytype) !BigInt {
         const first_byte = try der_reader.readByte();
         if (first_byte == 0x0 and length > 1) {
             // Positive number with highest bit set to 1 in the rest.
             const limb_count = std.math.divCeil(usize, length - 1, @sizeOf(usize)) catch unreachable;
             const limbs = try alloc.alloc(usize, limb_count);
-            std.mem.set(usize, limbs, 0);
+            @memset(limbs, 0);
             errdefer alloc.free(limbs);
 
-            var limb_ptr = @ptrCast([*]u8, limbs.ptr);
+            var limb_ptr: [*]u8 = @ptrCast(limbs.ptr);
             try der_reader.readNoEof(limb_ptr[0 .. length - 1]);
             // We always reverse because the standard library big int expects little endian.
             mem.reverse(u8, limb_ptr[0 .. length - 1]);
@@ -444,10 +437,10 @@ pub const der = struct {
         // Twos complement
         const limb_count = std.math.divCeil(usize, length, @sizeOf(usize)) catch unreachable;
         const limbs = try alloc.alloc(usize, limb_count);
-        std.mem.set(usize, limbs, 0);
+        @memset(limbs, 0);
         errdefer alloc.free(limbs);
 
-        var limb_ptr = @ptrCast([*]u8, limbs.ptr);
+        var limb_ptr: [*]u8 = @ptrCast(limbs.ptr);
         limb_ptr[0] = first_byte & ~@as(u8, 0x80);
         try der_reader.readNoEof(limb_ptr[1..length]);
 
@@ -469,7 +462,7 @@ pub const der = struct {
             // 1 byte value
             return first_byte;
         }
-        const length = @truncate(u7, first_byte);
+        const length: u7 = @truncate(first_byte);
         if (length > @sizeOf(usize))
             @panic("DER length does not fit in usize");
 
@@ -477,7 +470,7 @@ pub const der = struct {
         try der_reader.readNoEof(res_buf[0..length]);
         bytes_read.* += length;
 
-        if (std.builtin.target.cpu.arch.endian() != .Big) {
+        if (builtin.target.cpu.arch.endian() != .big) {
             mem.reverse(u8, res_buf[0..length]);
         }
         return mem.bytesToValue(usize, &res_buf);
@@ -485,7 +478,7 @@ pub const der = struct {
 
     fn parse_value_with_tag_byte(
         tag_byte: u8,
-        alloc: *Allocator,
+        alloc: Allocator,
         bytes_read: *usize,
         der_reader: anytype,
     ) DecodeError(@TypeOf(der_reader))!Value {
@@ -494,7 +487,7 @@ pub const der = struct {
             if (tag_byte & 0xC0 == 0x80) {
                 const length = try parse_length_internal(bytes_read, der_reader);
                 var cur_read_bytes: usize = 0;
-                var child = try alloc.create(Value);
+                const child = try alloc.create(Value);
                 errdefer alloc.destroy(child);
 
                 child.* = try parse_value_internal(alloc, &cur_read_bytes, der_reader);
@@ -540,9 +533,9 @@ pub const der = struct {
                     else => unreachable,
                 });
             },
-            .@"null" => {
+            .null => {
                 std.debug.assert((try parse_length_internal(bytes_read, der_reader)) == 0x00);
-                return .@"null";
+                return .null;
             },
             .object_identifier => {
                 const length = try parse_length_internal(bytes_read, der_reader);
@@ -580,7 +573,7 @@ pub const der = struct {
                 errdefer alloc.free(str_mem);
 
                 for (str_mem) |*wide_char| {
-                    wide_char.* = try der_reader.readIntBig(u16);
+                    wide_char.* = try der_reader.readInt(u16, .big);
                 }
                 bytes_read.* += length;
                 return Value{ .bmp_string = str_mem };
@@ -599,8 +592,8 @@ pub const der = struct {
                 bytes_read.* += length;
 
                 return @as(Value, switch (tag) {
-                    .sequence => .{ .sequence = arr.toOwnedSlice() },
-                    .set => .{ .set = arr.toOwnedSlice() },
+                    .sequence => .{ .sequence = try arr.toOwnedSlice() },
+                    .set => .{ .set = try arr.toOwnedSlice() },
                     else => unreachable,
                 });
             },
@@ -608,17 +601,26 @@ pub const der = struct {
         }
     }
 
-    fn parse_value_internal(alloc: *Allocator, bytes_read: *usize, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
+    fn parse_value_internal(alloc: Allocator, bytes_read: *usize, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
         const tag_byte = try der_reader.readByte();
         bytes_read.* += 1;
         return try parse_value_with_tag_byte(tag_byte, alloc, bytes_read, der_reader);
     }
 
-    pub fn parse_value(alloc: *Allocator, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
+    pub fn parse_value(alloc: Allocator, der_reader: anytype) DecodeError(@TypeOf(der_reader))!Value {
         var read: usize = 0;
         return try parse_value_internal(alloc, &read, der_reader);
     }
 };
+
+fn is(comptime id: std.builtin.TypeId) fn (type) bool {
+    const Closure = struct {
+        pub fn trait(comptime T: type) bool {
+            return id == @typeInfo(T);
+        }
+    };
+    return Closure.trait;
+}
 
 test "der.parse_value" {
     const github_der = @embedFile("../test/github.der");
@@ -627,5 +629,5 @@ test "der.parse_value" {
     var arena = ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    _ = try der.parse_value(&arena.allocator, fbs.reader());
+    _ = try der.parse_value(arena.allocator(), fbs.reader());
 }

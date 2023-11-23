@@ -11,7 +11,7 @@ const SignatureAlgorithm = x509.Certificate.SignatureAlgorithm;
 const asn1 = @import("asn1.zig");
 
 fn rsa_perform(
-    allocator: *Allocator,
+    allocator: Allocator,
     modulus: std.math.big.int.Const,
     exponent: std.math.big.int.Const,
     base: []const u8,
@@ -21,7 +21,7 @@ fn rsa_perform(
         usize,
         std.math.divCeil(usize, base.len, @sizeOf(usize)) catch unreachable,
     );
-    const curr_base_limb_bytes = @ptrCast([*]u8, curr_base_limbs)[0..base.len];
+    const curr_base_limb_bytes = @as([*]u8, @ptrCast(curr_base_limbs))[0..base.len];
     mem.copy(u8, curr_base_limb_bytes, base);
     mem.reverse(u8, curr_base_limb_bytes);
     var curr_base = (std.math.big.int.Mutable{
@@ -39,12 +39,12 @@ fn rsa_perform(
     while (curr_exponent.toConst().orderAgainstScalar(0) == .gt) {
         if (curr_exponent.isOdd()) {
             try result.ensureMulCapacity(result.toConst(), curr_base.toConst());
-            try result.mul(result.toConst(), curr_base.toConst());
+            try result.mul(&result, &curr_base);
             try llmod(&result, modulus);
         }
-        try curr_base.sqr(curr_base.toConst());
+        try curr_base.sqr(&curr_base);
         try llmod(&curr_base, modulus);
-        try curr_exponent.shiftRight(curr_exponent, 1);
+        try curr_exponent.shiftRight(&curr_exponent, 1);
     }
 
     if (result.limbs.len * @sizeOf(usize) < base.len)
@@ -56,7 +56,9 @@ fn rsa_perform(
 fn llmod(res: *std.math.big.int.Managed, n: std.math.big.int.Const) !void {
     var temp = try std.math.big.int.Managed.init(res.allocator);
     defer temp.deinit();
-    try temp.divTrunc(res, res.toConst(), n);
+    var tmpn = try n.toManaged(res.allocator);
+    defer tmpn.deinit();
+    try temp.divTrunc(res, res, &tmpn);
 }
 
 pub fn algorithm_prefix(signature_algorithm: SignatureAlgorithm) ?[]const u8 {
@@ -90,7 +92,7 @@ pub fn algorithm_prefix(signature_algorithm: SignatureAlgorithm) ?[]const u8 {
 }
 
 pub fn sign(
-    allocator: *Allocator,
+    allocator: Allocator,
     signature_algorithm: SignatureAlgorithm,
     hash: []const u8,
     private_key: x509.PrivateKey,
@@ -109,10 +111,10 @@ pub fn sign(
     // EM = 0x00 || 0x01 || PS || 0x00 || T
     sig_buf[0] = 0;
     sig_buf[1] = 1;
-    mem.set(u8, sig_buf[2 .. first_prefix_idx - 1], 0xff);
+    @memset(sig_buf[2 .. first_prefix_idx - 1], 0xff);
     sig_buf[first_prefix_idx - 1] = 0;
-    mem.copy(u8, sig_buf[first_prefix_idx..first_hash_idx], prefix);
-    mem.copy(u8, sig_buf[first_hash_idx..], hash);
+    @memcpy(sig_buf[first_prefix_idx..first_hash_idx], prefix);
+    @memcpy(sig_buf[first_hash_idx..], hash);
 
     const modulus = std.math.big.int.Const{ .limbs = private_key.rsa.modulus, .positive = true };
     const exponent = std.math.big.int.Const{ .limbs = private_key.rsa.exponent, .positive = true };
@@ -123,16 +125,32 @@ pub fn sign(
         return null;
     }
 
-    const enc_buf = @ptrCast([*]u8, rsa_result.limbs.ptr)[0..signature_length];
+    const enc_buf = @as([*]u8, @ptrCast(rsa_result.limbs.ptr))[0..signature_length];
     mem.reverse(u8, enc_buf);
-    return allocator.resize(
+    return resize(
+        allocator,
         enc_buf.ptr[0 .. rsa_result.limbs.len * @sizeOf(usize)],
         signature_length,
-    ) catch unreachable;
+    ) orelse unreachable;
+}
+
+fn resize(self: Allocator, old_mem: anytype, new_n: usize) ?@TypeOf(old_mem) {
+    const Slice = @typeInfo(@TypeOf(old_mem)).Pointer;
+    const T = Slice.child;
+    if (new_n == 0) {
+        self.free(old_mem);
+        return &[0]T{};
+    }
+    const old_byte_slice = mem.sliceAsBytes(old_mem);
+    const new_byte_count = std.math.mul(usize, @sizeOf(T), new_n) catch return null;
+    const rc = self.rawResize(old_byte_slice, Slice.alignment, new_byte_count, @returnAddress());
+    if (!rc) return null;
+    const new_byte_slice = old_byte_slice.ptr[0..new_byte_count];
+    return mem.bytesAsSlice(T, new_byte_slice);
 }
 
 pub fn verify_signature(
-    allocator: *Allocator,
+    allocator: Allocator,
     signature_algorithm: SignatureAlgorithm,
     signature: asn1.BitString,
     hash: []const u8,
@@ -154,7 +172,7 @@ pub fn verify_signature(
     if (rsa_result.limbs.len * @sizeOf(usize) < signature.data.len)
         return false;
 
-    const enc_buf = @ptrCast([*]u8, rsa_result.limbs.ptr)[0..signature.data.len];
+    const enc_buf = @as([*]u8, @ptrCast(rsa_result.limbs.ptr))[0..signature.data.len];
     mem.reverse(u8, enc_buf);
 
     if (enc_buf[0] != 0x00 or enc_buf[1] != 0x01)
@@ -173,7 +191,7 @@ pub fn verify_signature(
 }
 
 pub fn certificate_verify_signature(
-    allocator: *Allocator,
+    allocator: Allocator,
     signature_algorithm: x509.Certificate.SignatureAlgorithm,
     signature: asn1.BitString,
     bytes: []const u8,

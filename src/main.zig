@@ -34,7 +34,7 @@ pub const RecordHeader = struct {
     }
 
     pub inline fn len(self: @This()) u16 {
-        return mem.readIntSliceBig(u16, self.data[3..]);
+        return mem.readInt(u16, self.data[3..], .big);
     }
 };
 
@@ -56,7 +56,7 @@ pub fn record_length(t: u8, reader: anytype) !usize {
     try reader.readNoEof(&header);
     if (!mem.eql(u8, header[0..2], "\x03\x03") and !mem.eql(u8, header[0..2], "\x03\x01"))
         return error.ServerInvalidVersion;
-    return mem.readIntSliceBig(u16, header[2..4]);
+    return mem.readInt(u16, header[2..4], .big);
 }
 
 pub const ServerAlert = error{
@@ -206,7 +206,7 @@ fn CertificateReaderState(comptime Reader: type) type {
 fn CertificateReader(comptime Reader: type) type {
     const S = struct {
         pub fn read(state: *CertificateReaderState(Reader), buffer: []u8) Reader.Error!usize {
-            const out_bytes = std.math.min(buffer.len, state.length - state.idx);
+            const out_bytes = @min(buffer.len, state.length - state.idx);
             const res = try state.reader.readAll(buffer[0..out_bytes]);
             state.idx += res;
             return res;
@@ -218,7 +218,7 @@ fn CertificateReader(comptime Reader: type) type {
 
 pub const CertificateVerifier = union(enum) {
     none,
-    function: anytype,
+    function: ?*const anyopaque,
     default,
 };
 
@@ -408,7 +408,6 @@ fn add_cert_extensions(state: *VerifierCaptureState, tag: u8, length: usize, rea
 
 fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     _ = tag;
-    _ = length;
 
     const start = state.fbs.pos;
 
@@ -428,13 +427,13 @@ fn add_cert_extension(state: *VerifierCaptureState, tag: u8, length: usize, read
     switch (data[3]) {
         17 => {
             const san_tag = try reader.readByte();
-            if (san_tag != @enumToInt(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
+            if (san_tag != @intFromEnum(asn1.Tag.octet_string)) return error.DoesNotMatchSchema;
 
             const san_length = try asn1.der.parse_length(reader);
             _ = san_length;
 
             const body_tag = try reader.readByte();
-            if (body_tag != @enumToInt(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
+            if (body_tag != @intFromEnum(asn1.Tag.sequence)) return error.DoesNotMatchSchema;
 
             const body_length = try asn1.der.parse_length(reader);
             const total_read = state.fbs.pos - start;
@@ -525,7 +524,6 @@ fn set_signature_algorithm(state: *VerifierCaptureState, tag: u8, length: usize,
 
 fn set_signature_value(state: *VerifierCaptureState, tag: u8, length: usize, reader: anytype) !void {
     _ = tag;
-    _ = length;
 
     const unused_bits = try reader.readByte();
     const bit_count = (length - 1) * 8 - unused_bits;
@@ -577,7 +575,7 @@ const ServerCertificate = struct {
                 const start = self.pos + 2;
                 const end = start + len;
                 self.pos = end;
-                if (@enumToInt(self.choice) == choice - 0x80) {
+                if (@intFromEnum(self.choice) == choice - 0x80) {
                     return self.cert.raw_subject_alternative_name[start..end];
                 }
             }
@@ -588,7 +586,7 @@ const ServerCertificate = struct {
 
 const VerifierCaptureState = struct {
     list: std.ArrayListUnmanaged(ServerCertificate),
-    allocator: *Allocator,
+    allocator: Allocator,
     // Used in `add_server_cert` to avoid an extra allocation
     fbs: *std.io.FixedBufferStream([]const u8),
 };
@@ -642,7 +640,7 @@ fn cert_name_matches(cert_name: []const u8, hostname: []const u8) bool {
 }
 
 pub fn default_cert_verifier(
-    allocator: *mem.Allocator,
+    allocator: mem.Allocator,
     reader: anytype,
     certs_bytes: usize,
     trusted_certificates: []const x509.Certificate,
@@ -680,7 +678,7 @@ pub fn default_cert_verifier(
 
     var bytes_read: u24 = 0;
     while (bytes_read < certs_bytes) {
-        const cert_length = try reader.readIntBig(u24);
+        const cert_length = try reader.readInt(u24, .big);
 
         asn1.der.parse_schema(schema, captures, reader) catch |err| switch (err) {
             error.InvalidLength,
@@ -757,10 +755,10 @@ pub fn default_cert_verifier(
     return error.CertificateVerificationFailed;
 }
 
-pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: usize) !x509.PublicKey {
+pub fn extract_cert_public_key(allocator: Allocator, reader: anytype, length: usize) !x509.PublicKey {
     const CaptureState = struct {
         pub_key: x509.PublicKey,
-        allocator: *Allocator,
+        allocator: Allocator,
     };
     var capture_state = CaptureState{
         .pub_key = undefined,
@@ -796,7 +794,6 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
             fn f(state: *CaptureState, tag: u8, _length: usize, subreader: anytype) !void {
                 _ = tag;
                 _ = _length;
-
                 state.pub_key = x509.parse_public_key(state.allocator, subreader) catch |err| switch (err) {
                     error.MalformedDER => return error.ServerMalformedResponse,
                     else => |e| return e,
@@ -805,7 +802,7 @@ pub fn extract_cert_public_key(allocator: *Allocator, reader: anytype, length: u
         }.f,
     };
 
-    const cert_length = try reader.readIntBig(u24);
+    const cert_length = try reader.readInt(u24, .big);
     asn1.der.parse_schema(schema, captures, reader) catch |err| switch (err) {
         error.InvalidLength,
         error.InvalidTag,
@@ -827,7 +824,7 @@ pub const curves = struct {
         const pub_key_len = 32;
         const Keys = std.crypto.dh.X25519.KeyPair;
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             while (true) {
                 var seed: [32]u8 = undefined;
                 rand.bytes(&seed);
@@ -854,7 +851,7 @@ pub const curves = struct {
         const pub_key_len = 97;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP384R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [48]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP384R1, seed);
@@ -880,7 +877,7 @@ pub const curves = struct {
         const pub_key_len = 65;
         const Keys = crypto.ecc.KeyPair(crypto.ecc.SECP256R1);
 
-        inline fn make_key_pair(rand: *std.rand.Random) Keys {
+        inline fn make_key_pair(rand: std.rand.Random) Keys {
             var seed: [32]u8 = undefined;
             rand.bytes(&seed);
             return crypto.ecc.make_key_pair(crypto.ecc.SECP256R1, seed);
@@ -914,7 +911,7 @@ pub const curves = struct {
     fn max_pre_master_secret_len(comptime list: anytype) usize {
         var max: usize = 0;
         for (list) |curve| {
-            const curr = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).field_type).Array.len;
+            const curr = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).type).Array.len;
             if (curr > max)
                 max = curr;
         }
@@ -922,25 +919,25 @@ pub const curves = struct {
     }
 
     fn KeyPair(comptime list: anytype) type {
-        var fields: [list.len]std.builtin.TypeInfo.UnionField = undefined;
-        for (list) |curve, i| {
+        var fields: [list.len]std.builtin.Type.UnionField = undefined;
+        for (list, 0..) |curve, i| {
             fields[i] = .{
                 .name = curve.name,
-                .field_type = curve.Keys,
+                .type = curve.Keys,
                 .alignment = @alignOf(curve.Keys),
             };
         }
         return @Type(.{
             .Union = .{
-                .layout = .Extern,
+                .layout = .Auto,
                 .tag_type = null,
                 .fields = &fields,
-                .decls = &[0]std.builtin.TypeInfo.Declaration{},
+                .decls = &[0]std.builtin.Type.Declaration{},
             },
         });
     }
 
-    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: *std.rand.Random) KeyPair(list) {
+    inline fn make_key_pair(comptime list: anytype, curve_id: u16, rand: std.rand.Random) KeyPair(list) {
         inline for (list) |curve| {
             if (curve.tag == curve_id) {
                 return @unionInit(KeyPair(list), curve.name, curve.make_key_pair(rand));
@@ -1033,7 +1030,7 @@ pub fn client_connect(
     rand.bytes(&client_random);
 
     var server_random: [32]u8 = undefined;
-    const ciphersuite_bytes = 2 * suites.len + 2;
+    const ciphersuite_bytes = 2 * @as(u16, suites.len) + 2;
     const alpn_bytes = if (has_alpn) blk: {
         var sum: usize = 0;
         for (options.protocols) |proto| {
@@ -1046,7 +1043,7 @@ pub fn client_connect(
     {
         const client_hello_start = comptime blk: {
             // TODO: We assume the compiler is running in a little endian system
-            var starting_part: [46]u8 = [_]u8{
+            const starting_part: [46]u8 = [_]u8{
                 // Record header: Handshake record type, protocol version, handshake size
                 0x16, 0x03,      0x01,      undefined, undefined,
                 // Handshake message type, bytes of client hello
@@ -1057,8 +1054,8 @@ pub fn client_connect(
             } ++ ([1]u8{undefined} ** 32) ++ [_]u8{
                 // Session ID
                 0x00,
-            } ++ mem.toBytes(@byteSwap(u16, ciphersuite_bytes));
-            // using .* = mem.asBytes(...).* or mem.writeIntBig didn't work...
+            } ++ mem.toBytes(@byteSwap(ciphersuite_bytes));
+            // using .* = mem.asBytes(...).* or mem.writeInt didn't work.,.big..
 
             // Same as above, couldnt achieve this with a single buffer.
             // TLS_EMPTY_RENEGOTIATION_INFO_SCSV
@@ -1070,10 +1067,10 @@ pub fn client_connect(
                 if (cs.hash != .sha256)
                     @compileError("Non SHA256 hash algorithm is not supported yet.");
 
-                ciphersuite_buf = ciphersuite_buf ++ mem.toBytes(@byteSwap(u16, cs.tag));
+                ciphersuite_buf = ciphersuite_buf ++ mem.toBytes(@byteSwap(cs.tag));
             }
 
-            var ending_part: [13]u8 = [_]u8{
+            const ending_part: [13]u8 = [_]u8{
                 // Compression methods (no compression)
                 0x01,      0x00,
                 // Extensions length
@@ -1090,25 +1087,25 @@ pub fn client_connect(
             break :blk starting_part ++ ciphersuite_buf ++ ending_part;
         };
 
-        var msg_buf = client_hello_start.ptr[0..client_hello_start.len].*;
-        mem.writeIntBig(u16, msg_buf[3..5], @intCast(u16, alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes + curvelist_bytes));
-        mem.writeIntBig(u24, msg_buf[6..9], @intCast(u24, alpn_bytes + hostname.len + 0x51 + ciphersuite_bytes + curvelist_bytes));
+        var msg_buf = client_hello_start[0..client_hello_start.len].*;
+        mem.writeInt(u16, msg_buf[3..5], @as(u16, @intCast(alpn_bytes + hostname.len + 0x55 + ciphersuite_bytes + curvelist_bytes)), .big);
+        mem.writeInt(u24, msg_buf[6..9], @as(u24, @intCast(alpn_bytes + hostname.len + 0x51 + ciphersuite_bytes + curvelist_bytes)), .big);
         mem.copy(u8, msg_buf[11..43], &client_random);
-        mem.writeIntBig(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @intCast(u16, alpn_bytes + hostname.len + 0x28 + curvelist_bytes));
-        mem.writeIntBig(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 5));
-        mem.writeIntBig(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len + 3));
-        mem.writeIntBig(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @intCast(u16, hostname.len));
+        mem.writeInt(u16, msg_buf[48 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(alpn_bytes + hostname.len + 0x28 + curvelist_bytes)), .big);
+        mem.writeInt(u16, msg_buf[52 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len + 5)), .big);
+        mem.writeInt(u16, msg_buf[54 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len + 3)), .big);
+        mem.writeInt(u16, msg_buf[57 + ciphersuite_bytes ..][0..2], @as(u16, @intCast(hostname.len)), .big);
         try writer.writeAll(msg_buf[0..5]);
         try hashing_writer.writeAll(msg_buf[5..]);
     }
     try hashing_writer.writeAll(hostname);
     if (has_alpn) {
         var msg_buf = [6]u8{ 0x00, 0x10, undefined, undefined, undefined, undefined };
-        mem.writeIntBig(u16, msg_buf[2..4], @intCast(u16, alpn_bytes - 4));
-        mem.writeIntBig(u16, msg_buf[4..6], @intCast(u16, alpn_bytes - 6));
+        mem.writeInt(u16, msg_buf[2..4], @as(u16, @intCast(alpn_bytes - 4)), .big);
+        mem.writeInt(u16, msg_buf[4..6], @as(u16, @intCast(alpn_bytes - 6)), .big);
         try hashing_writer.writeAll(&msg_buf);
         for (options.protocols) |proto| {
-            try hashing_writer.writeByte(@intCast(u8, proto.len));
+            try hashing_writer.writeByte(@intCast(proto.len));
             try hashing_writer.writeAll(proto);
         }
     }
@@ -1121,12 +1118,12 @@ pub fn client_connect(
             undefined, undefined,
         };
 
-        mem.writeIntBig(u16, msg_buf[2..4], @intCast(u16, curvelist_bytes + 2));
-        mem.writeIntBig(u16, msg_buf[4..6], @intCast(u16, curvelist_bytes));
+        mem.writeInt(u16, msg_buf[2..4], @as(u16, @intCast(curvelist_bytes + 2)), .big);
+        mem.writeInt(u16, msg_buf[4..6], @as(u16, @intCast(curvelist_bytes)), .big);
         try hashing_writer.writeAll(&msg_buf);
 
         inline for (curvelist) |curve| {
-            try hashing_writer.writeIntBig(u16, curve.tag);
+            try hashing_writer.writeInt(u16, curve.tag, .big);
         }
     }
 
@@ -1167,7 +1164,7 @@ pub fn client_connect(
             try hashing_reader.skipBytes(sess_id_len, .{});
 
         {
-            ciphersuite = try hashing_reader.readIntBig(u16);
+            ciphersuite = try hashing_reader.readInt(u16, .big);
             var found = false;
             inline for (suites) |cs| {
                 if (ciphersuite == cs.tag) {
@@ -1184,13 +1181,13 @@ pub fn client_connect(
         if ((try hashing_reader.readByte()) != 0x00)
             return error.ServerInvalidCompressionMethod;
 
-        const exts_length = try hashing_reader.readIntBig(u16);
+        const exts_length = try hashing_reader.readInt(u16, .big);
         var ext_byte_idx: usize = 0;
         while (ext_byte_idx < exts_length) {
             var ext_tag: [2]u8 = undefined;
             try hashing_reader.readNoEof(&ext_tag);
 
-            const ext_len = try hashing_reader.readIntBig(u16);
+            const ext_len = try hashing_reader.readInt(u16, .big);
             ext_byte_idx += 4 + ext_len;
             if (ext_tag[0] == 0xFF and ext_tag[1] == 0x01) {
                 // Renegotiation info
@@ -1213,7 +1210,7 @@ pub fn client_connect(
                 if (!found_uncompressed)
                     return error.ServerInvalidECPointCompression;
             } else if (has_alpn and ext_tag[0] == 0x00 and ext_tag[1] == 0x10) {
-                const alpn_ext_len = try hashing_reader.readIntBig(u16);
+                const alpn_ext_len = try hashing_reader.readInt(u16, .big);
                 if (alpn_ext_len != ext_len - 2)
                     return error.ServerMalformedResponse;
                 const str_len = try hashing_reader.readByte();
@@ -1244,7 +1241,7 @@ pub fn client_connect(
             if (handshake_header[0] != 0x0b)
                 return error.ServerMalformedResponse;
         }
-        const certs_length = try hashing_reader.readIntBig(u24);
+        const certs_length = try hashing_reader.readInt(u24, .big);
         const cert_verifier: CertificateVerifier = options.cert_verifier;
         switch (cert_verifier) {
             .none => certificate_public_key = try extract_cert_public_key(
@@ -1257,7 +1254,7 @@ pub fn client_connect(
                     .reader = hashing_reader,
                     .length = certs_length,
                 };
-                var cert_reader = CertificateReader(@TypeOf(hashing_reader)){ .context = &reader_state };
+                const cert_reader = CertificateReader(@TypeOf(hashing_reader)){ .context = &reader_state };
                 certificate_public_key = try f(cert_reader);
                 try hashing_reader.skipBytes(reader_state.length - reader_state.idx, .{});
             },
@@ -1289,7 +1286,7 @@ pub fn client_connect(
             if (curve_id_buf[0] != 0x03)
                 return error.ServerMalformedResponse;
 
-            curve_id = mem.readIntBig(u16, curve_id_buf[1..]);
+            curve_id = mem.readInt(u16, curve_id_buf[1..], .big);
             var found = false;
             inline for (curvelist) |curve| {
                 if (curve.tag == curve_id) {
@@ -1319,8 +1316,8 @@ pub fn client_connect(
         }
 
         // Signed public key
-        const signature_id = try hashing_reader.readIntBig(u16);
-        const signature_len = try hashing_reader.readIntBig(u16);
+        const signature_id = try hashing_reader.readInt(u16, .big);
+        const signature_len = try hashing_reader.readInt(u16, .big);
 
         var hash_buf: [64]u8 = undefined;
         var hash: []const u8 = undefined;
@@ -1379,7 +1376,7 @@ pub fn client_connect(
                 return error.ServerMalformedResponse;
         } else if (record_type == 13) {
             // Certificate request
-            const certificate_request_bytes = try hashing_reader.readIntBig(u24);
+            const certificate_request_bytes = try hashing_reader.readInt(u24, .big);
             const hello_done_in_same_record =
                 if (length == certificate_request_bytes + 8)
                 true
@@ -1395,15 +1392,15 @@ pub fn client_connect(
             var chosen_client_certificates = std.ArrayListUnmanaged(*const x509.ClientCertificateChain){};
             defer chosen_client_certificates.deinit(options.temp_allocator);
 
-            const signature_algorithms_bytes = try hashing_reader.readIntBig(u16);
+            const signature_algorithms_bytes = try hashing_reader.readInt(u16, .big);
             if (@hasField(Options, "client_certificates")) {
                 var i: usize = 0;
                 while (i < signature_algorithms_bytes / 2) : (i += 1) {
                     var signature_algorithm: [2]u8 = undefined;
                     try hashing_reader.readNoEof(&signature_algorithm);
                     for (options.client_certificates) |*cert_chain| {
-                        if (@enumToInt(cert_chain.signature_algorithm.hash) == signature_algorithm[0] and
-                            @enumToInt(cert_chain.signature_algorithm.signature) == signature_algorithm[1])
+                        if (@intFromEnum(cert_chain.signature_algorithm.hash) == signature_algorithm[0] and
+                            @intFromEnum(cert_chain.signature_algorithm.signature) == signature_algorithm[1])
                         {
                             try chosen_client_certificates.append(options.temp_allocator, cert_chain);
                         }
@@ -1413,7 +1410,7 @@ pub fn client_connect(
                 try hashing_reader.skipBytes(signature_algorithms_bytes, .{});
             }
 
-            const certificate_authorities_bytes = try hashing_reader.readIntBig(u16);
+            const certificate_authorities_bytes = try hashing_reader.readInt(u16, .big);
             if (chosen_client_certificates.items.len == 0) {
                 try hashing_reader.skipBytes(certificate_authorities_bytes, .{});
             } else {
@@ -1471,23 +1468,23 @@ pub fn client_connect(
                 const certificate_count = client_certificate.?.cert_len;
                 // 7 bytes for the record type tag (1), record length (3), certificate list length (3)
                 // 3 bytes for each certificate length
-                var total_len: u24 = 7 + 3 * @intCast(u24, certificate_count);
+                var total_len = 7 + 3 * @as(u24, @intCast(certificate_count));
                 var i: usize = 0;
                 while (i < certificate_count) : (i += 1) {
-                    total_len += @intCast(u24, client_certificate.?.raw_certs[i].len);
+                    total_len += @intCast(client_certificate.?.raw_certs[i].len);
                 }
-                try writer.writeIntBig(u16, @intCast(u16, total_len));
+                try writer.writeInt(u16, @as(u16, @intCast(total_len)), .big);
                 var msg_buf: [7]u8 = [1]u8{0x0b} ++ ([1]u8{undefined} ** 6);
-                mem.writeIntBig(u24, msg_buf[1..4], total_len - 4);
-                mem.writeIntBig(u24, msg_buf[4..7], total_len - 7);
+                mem.writeInt(u24, msg_buf[1..4], total_len - 4, .big);
+                mem.writeInt(u24, msg_buf[4..7], total_len - 7, .big);
                 try hashing_writer.writeAll(&msg_buf);
                 i = 0;
                 while (i < certificate_count) : (i += 1) {
-                    try hashing_writer.writeIntBig(u24, @intCast(u24, client_certificate.?.raw_certs[i].len));
+                    try hashing_writer.writeInt(u24, @as(u24, @intCast(client_certificate.?.raw_certs[i].len)), .big);
                     try hashing_writer.writeAll(client_certificate.?.raw_certs[i]);
                 }
             } else {
-                try writer.writeIntBig(u16, 7);
+                try writer.writeInt(u16, 7, .big);
                 try hashing_writer.writeAll(&[7]u8{ 0x0b, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00 });
             }
         } else return error.ServerMalformedResponse;
@@ -1498,12 +1495,12 @@ pub fn client_connect(
 
     // Client key exchange
     try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
-    try writer.writeIntBig(u16, pub_key_len + 5);
+    try writer.writeInt(u16, pub_key_len + 5, .big);
     try hashing_writer.writeAll(&[5]u8{ 0x10, 0x00, 0x00, pub_key_len + 1, pub_key_len });
 
     inline for (curvelist) |curve| {
         if (curve.tag == curve_id) {
-            const actual_len = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).field_type).Array.len;
+            const actual_len = @typeInfo(std.meta.fieldInfo(curve.Keys, .public_key).type).Array.len;
             if (pub_key_len == actual_len + 1) {
                 try hashing_writer.writeByte(0x04);
             } else {
@@ -1550,12 +1547,12 @@ pub fn client_connect(
             defer options.temp_allocator.free(signed);
 
             try writer.writeAll(&[3]u8{ 0x16, 0x03, 0x03 });
-            try writer.writeIntBig(u16, @intCast(u16, signed.len + 8));
+            try writer.writeInt(u16, @as(u16, @intCast(signed.len + 8)), .big);
             var msg_buf: [8]u8 = [1]u8{0x0F} ++ ([1]u8{undefined} ** 7);
-            mem.writeIntBig(u24, msg_buf[1..4], @intCast(u24, signed.len + 4));
-            msg_buf[4] = @enumToInt(client_cert.signature_algorithm.hash);
-            msg_buf[5] = @enumToInt(client_cert.signature_algorithm.signature);
-            mem.writeIntBig(u16, msg_buf[6..8], @intCast(u16, signed.len));
+            mem.writeInt(u24, msg_buf[1..4], @as(u24, @intCast(signed.len + 4)), .big);
+            msg_buf[4] = @intFromEnum(client_cert.signature_algorithm.hash);
+            msg_buf[5] = @intFromEnum(client_cert.signature_algorithm.signature);
+            mem.writeInt(u16, msg_buf[6..8], @as(u16, @intCast(signed.len)), .big);
             try hashing_writer.writeAll(&msg_buf);
             try hashing_writer.writeAll(signed);
         }
@@ -1574,14 +1571,15 @@ pub fn client_connect(
             server_public_key_buf,
         );
 
-        var seed: [77]u8 = undefined;
+        const seedlen = 77;
+        var seed: [seedlen]u8 = undefined;
         seed[0..13].* = "master secret".*;
         seed[13..45].* = client_random;
         seed[45..77].* = server_random;
 
-        var a1: [32 + seed.len]u8 = undefined;
+        var a1: [32 + seedlen]u8 = undefined;
         Hmac256.create(a1[0..32], &seed, pre_master_secret);
-        var a2: [32 + seed.len]u8 = undefined;
+        var a2: [32 + seedlen]u8 = undefined;
         Hmac256.create(a2[0..32], a1[0..32], pre_master_secret);
 
         a1[32..].* = seed;
@@ -1604,8 +1602,8 @@ pub fn client_connect(
 
         const KeyExpansionState = struct {
             seed: *const [77]u8,
-            a1: *[32 + seed.len]u8,
-            a2: *[32 + seed.len]u8,
+            a1: *[32 + seedlen]u8,
+            a2: *[32 + seedlen]u8,
             master_secret: *const [48]u8,
         };
 
@@ -1754,7 +1752,7 @@ pub fn Client(
         server_seq: u64 = 1,
         key_data: ciphers.KeyData(_ciphersuites),
         read_state: ReadState = .none,
-        rand: *std.rand.Random,
+        rand: std.rand.Random,
 
         parent_reader: _Reader,
         parent_writer: _Writer,
@@ -1769,6 +1767,15 @@ pub fn Client(
             return .{ .context = self };
         }
 
+        fn lenOverhead(self: *const @This()) u16 {
+            inline for (_ciphersuites) |cs| {
+                if (self.ciphersuite == cs.tag) {
+                    return cs.mac_length + cs.prefix_data_length;
+                }
+            }
+            unreachable;
+        }
+
         pub fn read(self: *@This(), buffer: []u8) ReaderError!usize {
             const buf_size = 1024;
 
@@ -1779,11 +1786,7 @@ pub fn Client(
                         else => |e| return e,
                     };
 
-                    const len_overhead = inline for (_ciphersuites) |cs| {
-                        if (self.ciphersuite == cs.tag) {
-                            break cs.mac_length + cs.prefix_data_length;
-                        }
-                    } else unreachable;
+                    const len_overhead = self.lenOverhead();
 
                     const rec_length = header.len();
                     if (rec_length < len_overhead)
@@ -1850,7 +1853,7 @@ pub fn Client(
                             return 0;
                         return alert_byte_to_error(result[1]);
                     } else if (header.tag() == 0x17) {
-                        const curr_bytes = std.math.min(std.math.min(len, buf_size), buffer.len);
+                        const curr_bytes = @min(@min(len, buf_size), buffer.len);
                         // Partially decrypt the data.
                         var encrypted: [buf_size]u8 = undefined;
                         const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
@@ -1881,7 +1884,7 @@ pub fn Client(
                     } else unreachable;
                 },
                 .in_record => |*in_record| {
-                    const curr_bytes = std.math.min(std.math.min(buf_size, buffer.len), in_record.record_length - in_record.index);
+                    const curr_bytes = @min(@min(buf_size, buffer.len), in_record.record_length - in_record.index);
                     // Partially decrypt the data.
                     var encrypted: [buf_size]u8 = undefined;
                     const actually_read = try self.parent_reader.read(encrypted[0..curr_bytes]);
@@ -1919,7 +1922,7 @@ pub fn Client(
             inline for (_ciphersuites) |cs| {
                 if (self.ciphersuite == cs.tag) {
                     // @TODO Make this buffer size configurable
-                    const curr_bytes = @truncate(u16, std.math.min(buffer.len, 1024));
+                    const curr_bytes: u16 = @min(buffer.len, 1024);
                     try cs.raw_write(
                         1024,
                         self.rand,
@@ -1965,12 +1968,7 @@ test "HTTPS request on wikipedia main page" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -1989,7 +1987,7 @@ test "HTTPS request on wikipedia main page" {
 
     {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
-        try std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.spaces));
+        try std.testing.expectEqualStrings("HTTP/1.1 200 OK", mem.trim(u8, header, &std.ascii.whitespace));
         std.testing.allocator.free(header);
     }
 
@@ -1999,7 +1997,7 @@ test "HTTPS request on wikipedia main page" {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
         defer std.testing.allocator.free(header);
 
-        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        const hdr_contents = mem.trim(u8, header, &std.ascii.whitespace);
         if (hdr_contents.len == 0) {
             break :hdr_loop;
         }
@@ -2023,12 +2021,7 @@ test "HTTPS request on wikipedia alternate name" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2048,12 +2041,7 @@ test "HTTPS request on twitch oath2 endpoint" {
     const sock = try std.net.tcpConnectToHost(std.testing.allocator, "id.twitch.tv", 443);
     defer sock.close();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     var client = try client_connect(.{
         .rand = rand,
@@ -2072,7 +2060,7 @@ test "HTTPS request on twitch oath2 endpoint" {
         const header = try client.reader().readUntilDelimiterAlloc(std.testing.allocator, '\n', std.math.maxInt(usize));
         defer std.testing.allocator.free(header);
 
-        const hdr_contents = mem.trim(u8, header, &std.ascii.spaces);
+        const hdr_contents = mem.trim(u8, header, &std.ascii.whitespace);
         if (hdr_contents.len == 0) {
             break :hdr_loop;
         }
@@ -2096,12 +2084,7 @@ test "Connecting to expired.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2125,12 +2108,7 @@ test "Connecting to wrong.host.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2154,12 +2132,7 @@ test "Connecting to self-signed.badssl.com returns an error" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
     if (client_connect(.{
         .rand = rand,
@@ -2183,17 +2156,10 @@ test "Connecting to client.badssl.com with a client certificate" {
     var trusted_chain = try x509.CertificateChain.from_pem(std.testing.allocator, fbs.reader());
     defer trusted_chain.deinit();
 
-    // @TODO Remove this once std.crypto.rand works in .evented mode
-    var rand = blk: {
-        var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-        try std.os.getrandom(&seed);
-        break :blk &std.rand.DefaultCsprng.init(seed).random;
-    };
+    const rand = std.crypto.random;
 
-    var client_cert = try x509.ClientCertificateChain.from_pem(
-        std.testing.allocator,
-        std.io.fixedBufferStream(@embedFile("../test/badssl.com-client.pem")).reader(),
-    );
+    var fbs2 = std.io.fixedBufferStream(@embedFile("../test/badssl.com-client.pem"));
+    var client_cert = try x509.ClientCertificateChain.from_pem(std.testing.allocator, fbs2.reader());
     defer client_cert.deinit(std.testing.allocator);
 
     var client = try client_connect(.{

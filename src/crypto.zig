@@ -12,10 +12,10 @@ pub const ChaCha20Stream = struct {
     pub fn initContext(key: [8]u32, d: [4]u32) BlockVec {
         const c = "expand 32-byte k";
         const constant_le = comptime [4]u32{
-            mem.readIntLittle(u32, c[0..4]),
-            mem.readIntLittle(u32, c[4..8]),
-            mem.readIntLittle(u32, c[8..12]),
-            mem.readIntLittle(u32, c[12..16]),
+            mem.readInt(u32, c[0..4], .little),
+            mem.readInt(u32, c[4..8], .little),
+            mem.readInt(u32, c[8..12], .little),
+            mem.readInt(u32, c[12..16], .little),
         };
         return BlockVec{
             constant_le[0], constant_le[1], constant_le[2], constant_le[3],
@@ -73,10 +73,10 @@ pub const ChaCha20Stream = struct {
     inline fn hashToBytes(out: *[64]u8, x: BlockVec) void {
         var i: usize = 0;
         while (i < 4) : (i += 1) {
-            mem.writeIntLittle(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0]);
-            mem.writeIntLittle(u32, out[16 * i + 4 ..][0..4], x[i * 4 + 1]);
-            mem.writeIntLittle(u32, out[16 * i + 8 ..][0..4], x[i * 4 + 2]);
-            mem.writeIntLittle(u32, out[16 * i + 12 ..][0..4], x[i * 4 + 3]);
+            mem.writeInt(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0], .little);
+            mem.writeInt(u32, out[16 * i + 4 ..][0..4], x[i * 4 + 1], .little);
+            mem.writeInt(u32, out[16 * i + 8 ..][0..4], x[i * 4 + 2], .little);
+            mem.writeInt(u32, out[16 * i + 12 ..][0..4], x[i * 4 + 3], .little);
         }
     }
 
@@ -105,14 +105,14 @@ pub const ChaCha20Stream = struct {
             mac.update(zeros[0..padding]);
         }
         var lens: [16]u8 = undefined;
-        mem.writeIntLittle(u64, lens[0..8], 13);
-        mem.writeIntLittle(u64, lens[8..16], len);
+        mem.writeInt(u64, lens[0..8], 13, .little);
+        mem.writeInt(u64, lens[8..16], len, .little);
         mac.update(lens[0..]);
         var computedTag: [16]u8 = undefined;
         mac.final(computedTag[0..]);
 
         var acc: u8 = 0;
-        for (computedTag) |_, i| {
+        for (computedTag, 0..) |_, i| {
             acc |= computedTag[i] ^ tag[i];
         }
         if (acc != 0) {
@@ -149,7 +149,7 @@ pub fn keyToWords(key: [32]u8) [8]u32 {
     var k: [8]u32 = undefined;
     var i: usize = 0;
     while (i < 8) : (i += 1) {
-        k[i] = mem.readIntLittle(u32, key[i * 4 ..][0..4]);
+        k[i] = mem.readInt(u32, key[i * 4 ..][0..4], .little);
     }
     return k;
 }
@@ -171,7 +171,7 @@ pub fn ctr(
 
     const offset = idx.* % block_length;
     if (offset != 0) {
-        const part_len = std.math.min(block_length - offset, src.len);
+        const part_len = @min(block_length - offset, src.len);
 
         var counter: [BlockCipher.block_length]u8 = undefined;
         mem.writeInt(u128, &counter, counterInt.*, endian);
@@ -349,7 +349,7 @@ pub const ecc = struct {
         k: []const u8,
     ) ![Curve.point_len]u8 {
         var P: Jacobian(Curve) = undefined;
-        var res: u32 = decode_to_jacobian(Curve, &P, point);
+        const res: u32 = decode_to_jacobian(Curve, &P, point);
         point_mul(Curve, &P, k);
         var out: [Curve.point_len]u8 = undefined;
         encode_from_jacobian(Curve, &out, P);
@@ -618,7 +618,7 @@ pub const ecc = struct {
         src: [Curve.point_len / 2]u8,
     ) u32 {
         const mlen = comptime ((Curve.P[0] + 31) >> 5);
-        const tlen = comptime std.math.max(mlen << 2, Curve.point_len / 2) + 4;
+        const tlen = comptime @max(mlen << 2, Curve.point_len / 2) + 4;
 
         var r: u32 = 0;
         var pass: usize = 0;
@@ -633,17 +633,17 @@ pub const ecc = struct {
                     @as(u32, src[Curve.point_len / 2 - 1 - u])
                 else
                     0;
-                acc |= b << @truncate(u5, acc_len);
+                acc |= b << @truncate(acc_len);
                 acc_len += 8;
                 if (acc_len >= 31) {
                     const xw = acc & 0x7FFFFFFF;
                     acc_len -= 31;
-                    acc = b >> @truncate(u5, 8 - acc_len);
+                    acc = b >> @truncate(8 - acc_len);
                     if (v <= mlen) {
                         if (pass != 0) {
                             x[v] = r & xw;
                         } else {
-                            const cc = @bitCast(u32, CMP(xw, Curve.P[v]));
+                            const cc: u32 = @bitCast(CMP(xw, Curve.P[v]));
                             r = MUX(EQ(cc, 0), r, cc);
                         }
                     } else if (pass == 0) {
@@ -714,21 +714,21 @@ pub const ecc = struct {
     }
 
     inline fn MUX(ctl: u32, x: u32, y: u32) u32 {
-        return y ^ (@bitCast(u32, -@bitCast(i32, ctl)) & (x ^ y));
+        return y ^ (@as(u32, @bitCast(-@as(i32, @bitCast(ctl)))) & (x ^ y));
     }
     inline fn NOT(ctl: u32) u32 {
         return ctl ^ 1;
     }
     inline fn NEQ(x: u32, y: u32) u32 {
         const q = x ^ y;
-        return (q | @bitCast(u32, -@bitCast(i32, q))) >> 31;
+        return (q | @as(u32, @bitCast(-@as(i32, @bitCast(q))))) >> 31;
     }
     inline fn EQ(x: u32, y: u32) u32 {
         const q = x ^ y;
-        return NOT((q | @bitCast(u32, -@bitCast(i32, q))) >> 31);
+        return NOT((q | @as(u32, @bitCast(-@as(i32, @bitCast(q))))) >> 31);
     }
     inline fn CMP(x: u32, y: u32) i32 {
-        return @bitCast(i32, GT(x, y)) | -@bitCast(i32, GT(y, x));
+        return @as(i32, @bitCast(GT(x, y))) | -@as(i32, @bitCast(GT(y, x)));
     }
     inline fn GT(x: u32, y: u32) u32 {
         const z = y -% x;
@@ -742,14 +742,14 @@ pub const ecc = struct {
     }
 
     fn CCOPY(ctl: u32, dst: []u8, src: []const u8) void {
-        for (src) |s, i| {
-            dst[i] = @truncate(u8, MUX(ctl, s, dst[i]));
+        for (src, 0..) |s, i| {
+            dst[i] = @truncate(MUX(ctl, s, dst[i]));
         }
     }
 
     inline fn set_zero(out: [*]u32, bit_len: u32) void {
         out[0] = bit_len;
-        mem.set(u32, (out + 1)[0 .. (bit_len + 31) >> 5], 0);
+        @memset((out + 1)[0 .. (bit_len + 31) >> 5], 0);
     }
 
     fn divrem(_hi: u32, _lo: u32, d: u32, r: *u32) u32 {
@@ -761,7 +761,7 @@ pub const ecc = struct {
 
         var k: u5 = 31;
         while (k > 0) : (k -= 1) {
-            const j = @truncate(u5, 32 - @as(u6, k));
+            const j: u5 = @truncate(32 - @as(u6, k));
             const w = (hi << j) | (lo >> k);
             const ctl = GE(w, d) | (hi >> k);
             const hi2 = (w -% d) >> j;
@@ -785,7 +785,7 @@ pub const ecc = struct {
         var a0: u32 = undefined;
         var a1: u32 = undefined;
         var b0: u32 = undefined;
-        const mblr = @intCast(u5, m[0] & 31);
+        const mblr: u5 = @intCast(m[0] & 31);
         const mlen = (m[0] + 31) >> 5;
         const hi = x[mlen];
         if (mblr == 0) {
@@ -811,8 +811,9 @@ pub const ecc = struct {
         while (u <= mlen) : (u += 1) {
             const mw = m[u];
             const zl = MUL31(mw, q) + cc;
-            cc = @truncate(u32, zl >> 31);
-            const zw = @truncate(u32, zl) & 0x7FFFFFFF;
+            cc = @truncate(zl >> 31);
+            // XXX
+            const zw = @as(u32, @truncate(zl)) & 0x7FFFFFFF;
             const xw = x[u];
             var nxw = xw -% zw;
             cc += nxw >> 31;
@@ -850,7 +851,7 @@ pub const ecc = struct {
         const bitlen = comptime (Curve.point_len / 2) << 3;
         var k: usize = 0;
         while (k < bitlen) : (k += 1) {
-            const ctl = (e[Curve.point_len / 2 - 1 - (k >> 3)] >> (@truncate(u3, k & 7))) & 1;
+            const ctl = (e[Curve.point_len / 2 - 1 - (k >> 3)] >> (@truncate(k & 7))) & 1;
             montymul(t2, x, t1, &Curve.P, m0i);
             CCOPY(ctl, mem.asBytes(x), mem.asBytes(t2));
             montymul(t2, t1, t1, &Curve.P, m0i);
@@ -861,7 +862,7 @@ pub const ecc = struct {
     fn encode_jacobian_part(dst: []u8, x: [*]const u32) void {
         const xlen = (x[0] + 31) >> 5;
 
-        var buf = @ptrToInt(dst.ptr) + dst.len;
+        var buf = @intFromPtr(dst.ptr) + dst.len;
         var len: usize = dst.len;
         var k: usize = 1;
         var acc: u32 = 0;
@@ -879,18 +880,18 @@ pub const ecc = struct {
                 if (len >= 4) {
                     buf -= 4;
                     len -= 4;
-                    mem.writeIntBig(u32, @intToPtr([*]u8, buf)[0..4], z);
+                    mem.writeInt(u32, @as([*]u8, @ptrFromInt(buf))[0..4], z, .big);
                 } else {
                     switch (len) {
                         3 => {
-                            @intToPtr(*u8, buf - 3).* = @truncate(u8, z >> 16);
-                            @intToPtr(*u8, buf - 2).* = @truncate(u8, z >> 8);
+                            @as(*u8, @ptrFromInt(buf - 3)).* = @truncate(z >> 16);
+                            @as(*u8, @ptrFromInt(buf - 2)).* = @truncate(z >> 8);
                         },
-                        2 => @intToPtr(*u8, buf - 2).* = @truncate(u8, z >> 8),
+                        2 => @as(*u8, @ptrFromInt(buf - 2)).* = @truncate(z >> 8),
                         1 => {},
                         else => unreachable,
                     }
-                    @intToPtr(*u8, buf - 1).* = @truncate(u8, z);
+                    @as(*u8, @ptrFromInt(buf - 1)).* = @truncate(z);
                     return;
                 }
             }
@@ -920,15 +921,17 @@ pub const ecc = struct {
                 inline while (j <= 4) : (j += 1) {
                     const z = out[v + j] +% MUL31(xu, y[v + j]) +% MUL31(f, m[v + j]) +% r;
                     r = z >> 31;
-                    out[v + j - 1] = @truncate(u32, z) & 0x7FFFFFFF;
+                    // XXX
+                    out[v + j - 1] = @as(u32, @truncate(z)) & 0x7FFFFFFF;
                 }
             }
             while (v < len) : (v += 1) {
                 const z = out[v + 1] +% MUL31(xu, y[v + 1]) +% MUL31(f, m[v + 1]) +% r;
                 r = z >> 31;
-                out[v] = @truncate(u32, z) & 0x7FFFFFFF;
+                // XXX
+                out[v] = @as(u32, @truncate(z)) & 0x7FFFFFFF;
             }
-            dh += @truncate(u32, r);
+            dh += @truncate(r);
             out[len] = dh & 0x7FFFFFFF;
             dh >>= 31;
         }
@@ -972,7 +975,7 @@ pub const ecc = struct {
         while (u > 0) : (u -= 1) {
             z |= arr[u];
         }
-        return ~(z | @bitCast(u32, -@bitCast(i32, z))) >> 31;
+        return ~(z | @as(u32, @bitCast(-@as(i32, @bitCast(z))))) >> 31;
     }
 };
 
@@ -986,20 +989,14 @@ test "elliptic curve functions with secp384r1 curve" {
         try std.testing.expectEqual(ecc.SECP384R1.base_point, out);
 
         // Multiply by one, check that the result is still the base point
-        mem.set(u8, &out, 0);
+        @memset(&out, 0);
         ecc.point_mul(ecc.SECP384R1, &P, &[1]u8{1});
         ecc.encode_from_jacobian(ecc.SECP384R1, &out, P);
         try std.testing.expectEqual(ecc.SECP384R1.base_point, out);
     }
 
     {
-        // @TODO Remove this once std.crypto.rand works in .evented mode
-        var rand = blk: {
-            var seed: [std.rand.DefaultCsprng.secret_seed_length]u8 = undefined;
-            try std.os.getrandom(&seed);
-            break :blk &std.rand.DefaultCsprng.init(seed).random;
-        };
-
+        const rand = std.crypto.random;
         // Derive a shared secret from a Diffie-Hellman key exchange
         var seed: [48]u8 = undefined;
         rand.bytes(&seed);

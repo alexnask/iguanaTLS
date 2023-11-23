@@ -1,7 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 
-usingnamespace @import("crypto.zig");
+const crypto = @import("crypto.zig");
 const Chacha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const Poly1305 = std.crypto.onetimeauth.Poly1305;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
@@ -12,7 +12,7 @@ const RecordHeader = main.RecordHeader;
 pub const suites = struct {
     pub const ECDHE_RSA_Chacha20_Poly1305 = struct {
         pub const name = "ECDHE-RSA-CHACHA20-POLY1305";
-        pub const tag = 0xCCA8;
+        pub const tag = @as(u16, 0xCCA8);
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
         pub const prefix_data_length = 0;
@@ -27,33 +27,33 @@ pub const suites = struct {
 
         pub const State = struct {
             mac: Poly1305,
-            context: ChaCha20Stream.BlockVec,
+            context: crypto.ChaCha20Stream.BlockVec,
             buf: [64]u8,
         };
 
         pub fn init_state(_: [0]u8, server_seq: u64, key_data: anytype, header: RecordHeader) State {
             const len = header.len() - 16;
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
-            mem.writeIntBig(u64, nonce[4..12], server_seq);
-            for (nonce) |*n, i| {
+            mem.writeInt(u64, nonce[4..12], server_seq, .big);
+            for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.server_iv(@This())[i];
             }
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], server_seq);
+            mem.writeInt(u64, additional_data[0..8], server_seq, .big);
             additional_data[8..11].* = header.data[0..3].*;
-            mem.writeIntBig(u16, additional_data[11..13], len);
+            mem.writeInt(u16, additional_data[11..13], len, .big);
 
             var c: [4]u32 = undefined;
             c[0] = 1;
-            c[1] = mem.readIntLittle(u32, nonce[0..4]);
-            c[2] = mem.readIntLittle(u32, nonce[4..8]);
-            c[3] = mem.readIntLittle(u32, nonce[8..12]);
-            const server_key = keyToWords(key_data.server_key(@This()).*);
+            c[1] = mem.readInt(u32, nonce[0..4], .little);
+            c[2] = mem.readInt(u32, nonce[4..8], .little);
+            c[3] = mem.readInt(u32, nonce[8..12], .little);
+            const server_key = crypto.keyToWords(key_data.server_key(@This()).*);
 
             return .{
-                .mac = ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
-                .context = ChaCha20Stream.initContext(server_key, c),
+                .mac = crypto.ChaCha20Stream.initPoly1305(key_data.server_key(@This()).*, nonce, additional_data),
+                .context = crypto.ChaCha20Stream.initContext(server_key, c),
                 .buf = undefined,
             };
         }
@@ -69,10 +69,10 @@ pub const suites = struct {
             _ = record_length;
 
             std.debug.assert(encrypted.len == out.len);
-            ChaCha20Stream.chacha20Xor(
+            crypto.ChaCha20Stream.chacha20Xor(
                 out,
                 encrypted,
-                keyToWords(key_data.server_key(@This()).*),
+                crypto.keyToWords(key_data.server_key(@This()).*),
                 &state.context,
                 idx,
                 &state.buf,
@@ -87,12 +87,12 @@ pub const suites = struct {
                 error.EndOfStream => return error.ServerMalformedResponse,
                 else => |e| return e,
             };
-            try ChaCha20Stream.checkPoly1305(&state.mac, record_length, poly1305_tag);
+            try crypto.ChaCha20Stream.checkPoly1305(&state.mac, record_length, poly1305_tag);
         }
 
         pub fn raw_write(
             comptime buffer_size: usize,
-            rand: *std.rand.Random,
+            rand: std.rand.Random,
             key_data: anytype,
             writer: anytype,
             prefix: [3]u8,
@@ -103,19 +103,19 @@ pub const suites = struct {
 
             std.debug.assert(buffer.len <= buffer_size);
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @intCast(u16, buffer.len + 16));
+            try writer.writeInt(u16, @as(u16, @intCast(buffer.len + 16)), .big);
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], seq);
+            mem.writeInt(u64, additional_data[0..8], seq, .big);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
+            mem.writeInt(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)), .big);
 
             var encrypted_data: [buffer_size]u8 = undefined;
             var tag_data: [16]u8 = undefined;
 
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
-            mem.writeIntBig(u64, nonce[4..12], seq);
-            for (nonce) |*n, i| {
+            mem.writeInt(u64, nonce[4..12], seq, .big);
+            for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.client_iv(@This())[i];
             }
 
@@ -160,7 +160,7 @@ pub const suites = struct {
 
     pub const ECDHE_RSA_AES128_GCM_SHA256 = struct {
         pub const name = "ECDHE-RSA-AES128-GCM-SHA256";
-        pub const tag = 0xC02F;
+        pub const tag = @as(u16, 0xC02F);
         pub const key_exchange = .ecdhe;
         pub const hash = .sha256;
         pub const prefix_data_length = 8;
@@ -189,11 +189,11 @@ pub const suites = struct {
 
             var j: [16]u8 = undefined;
             mem.copy(u8, j[0..12], iv[0..]);
-            mem.writeIntBig(u32, j[12..][0..4], 2);
+            mem.writeInt(u32, j[12..][0..4], 2, .big);
 
             return .{
                 .aes = Aes.initEnc(key_data.server_key(@This()).*),
-                .counterInt = mem.readInt(u128, &j, .Big),
+                .counterInt = mem.readInt(u128, &j, .big),
             };
         }
 
@@ -210,14 +210,14 @@ pub const suites = struct {
 
             std.debug.assert(encrypted.len == out.len);
 
-            ctr(
+            crypto.ctr(
                 @TypeOf(state.aes),
                 state.aes,
                 out,
                 encrypted,
                 &state.counterInt,
                 idx,
-                .Big,
+                .big,
             );
         }
 
@@ -263,7 +263,7 @@ pub const suites = struct {
 
         pub fn raw_write(
             comptime buffer_size: usize,
-            rand: *std.rand.Random,
+            rand: std.rand.Random,
             key_data: anytype,
             writer: anytype,
             prefix: [3]u8,
@@ -276,12 +276,12 @@ pub const suites = struct {
             rand.bytes(iv[4..12]);
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], seq);
+            mem.writeInt(u64, additional_data[0..8], seq, .big);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @intCast(u16, buffer.len));
+            mem.writeInt(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)), .big);
 
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @intCast(u16, buffer.len + 24));
+            try writer.writeInt(u16, @as(u16, @intCast(buffer.len + 24)), .big);
             try writer.writeAll(iv[4..12]);
 
             var encrypted_data: [buffer_size]u8 = undefined;
@@ -308,10 +308,7 @@ fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
         return null;
 
     const field_info = std.meta.fieldInfo(T, field);
-    if (!comptime std.meta.trait.is(.Array)(field_info.field_type) or std.meta.Elem(field_info.field_type) != u8)
-        @compileError("Field '" ++ field ++ "' of type '" ++ @typeName(T) ++ "' should be an array of u8.");
-
-    return @typeInfo(field_info.field_type).Array.len;
+    return @typeInfo(field_info.type).Array.len;
 }
 
 pub fn key_data_size(comptime ciphersuites: anytype) usize {
@@ -401,8 +398,8 @@ pub fn key_expansion(
                     chunk_cursor = 0;
                 }
 
-                const field_width = comptime (key_field_width(cs.Keys, field) orelse 0);
-                const first_read = comptime std.math.min(32 - chunk_cursor, field_width);
+                const field_width: usize = comptime (key_field_width(cs.Keys, field) orelse 0);
+                const first_read: usize = comptime @min(32 - chunk_cursor, field_width);
                 const second_read = field_width - first_read;
 
                 res.data[data_cursor..][0..first_read].* = chunk[chunk_cursor..][0..first_read].*;
@@ -426,20 +423,20 @@ pub fn key_expansion(
 }
 
 pub fn InRecordState(comptime ciphersuites: anytype) type {
-    var fields: [ciphersuites.len]std.builtin.TypeInfo.UnionField = undefined;
-    for (ciphersuites) |cs, i| {
+    var fields: [ciphersuites.len]std.builtin.Type.UnionField = undefined;
+    for (ciphersuites, 0..) |cs, i| {
         fields[i] = .{
             .name = cs.name,
-            .field_type = cs.State,
+            .type = cs.State,
             .alignment = if (@sizeOf(cs.State) > 0) @alignOf(cs.State) else 0,
         };
     }
     return @Type(.{
         .Union = .{
-            .layout = .Extern,
+            .layout = .Auto,
             .tag_type = null,
             .fields = &fields,
-            .decls = &[0]std.builtin.TypeInfo.Declaration{},
+            .decls = &[0]std.builtin.Type.Declaration{},
         },
     });
 }

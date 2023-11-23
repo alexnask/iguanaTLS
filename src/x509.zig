@@ -35,7 +35,7 @@ pub const PublicKey = union(enum) {
         curve_point: []const u8,
     },
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         switch (self) {
             .rsa => |rsa| {
                 alloc.free(rsa.modulus);
@@ -58,7 +58,7 @@ pub const PublicKey = union(enum) {
 
 pub const PrivateKey = PublicKey;
 
-pub fn parse_public_key(allocator: *Allocator, reader: anytype) !PublicKey {
+pub fn parse_public_key(allocator: Allocator, reader: anytype) !PublicKey {
     if ((try reader.readByte()) != 0x30)
         return error.MalformedDER;
     const seq_len = try asn1.der.parse_length(reader);
@@ -199,7 +199,7 @@ pub const Certificate = struct {
 
     const CaptureState = struct {
         self: *Certificate,
-        allocator: *Allocator,
+        allocator: Allocator,
         dn_allocated: bool = false,
         pk_allocated: bool = false,
     };
@@ -266,7 +266,7 @@ pub const Certificate = struct {
     }
 
     /// Initialize a trusted anchor from distinguished encoding rules (DER) encoded data
-    pub fn create(allocator: *Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
+    pub fn create(allocator: Allocator, der_reader: anytype) DecodeDERError(@TypeOf(der_reader))!@This() {
         var self: @This() = undefined;
         self.is_ca = false;
         // https://tools.ietf.org/html/rfc5280#page-117
@@ -323,7 +323,7 @@ pub const Certificate = struct {
         return self;
     }
 
-    pub fn deinit(self: @This(), alloc: *Allocator) void {
+    pub fn deinit(self: @This(), alloc: Allocator) void {
         alloc.free(self.dn);
         self.public_key.deinit(alloc);
     }
@@ -378,7 +378,7 @@ pub const Certificate = struct {
 pub const CertificateChain = struct {
     data: std.ArrayList(Certificate),
 
-    pub fn from_pem(allocator: *Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
+    pub fn from_pem(allocator: Allocator, pem_reader: anytype) DecodeDERError(@TypeOf(pem_reader))!@This() {
         var self = @This(){ .data = std.ArrayList(Certificate).init(allocator) };
         errdefer self.deinit();
 
@@ -447,7 +447,7 @@ pub const ClientCertificateChain = struct {
     private_key: PrivateKey,
 
     // TODO: Encrypted private keys, non-RSA private keys
-    pub fn from_pem(allocator: *Allocator, pem_reader: anytype) !@This() {
+    pub fn from_pem(allocator: Allocator, pem_reader: anytype) !@This() {
         var it = PEMSectionIterator(@TypeOf(pem_reader), .{
             .section_names = &.{
                 "X.509 CERTIFICATE",
@@ -475,7 +475,7 @@ pub const ClientCertificateChain = struct {
 
         while (try it.next()) |state_and_reader| {
             switch (state_and_reader.state) {
-                .@"X.509 CERTIFICATE", .@"CERTIFICATE" => {
+                .@"X.509 CERTIFICATE", .CERTIFICATE => {
                     const cert_bytes = try state_and_reader.reader.readAllAlloc(allocator, std.math.maxInt(usize));
                     errdefer allocator.free(cert_bytes);
                     try raw_certs.append(allocator, cert_bytes);
@@ -518,7 +518,6 @@ pub const ClientCertificateChain = struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
                                 _ = reader;
-
                                 // TODO: Some way to get tag + length buffer directly in the capture callback?
                                 const encoded_length = asn1.der.encode_length(length).slice();
                                 const pos = _state.fbs.pos;
@@ -531,7 +530,6 @@ pub const ClientCertificateChain = struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
                                 _ = length;
-
                                 if (_state.dns.items.len == 1)
                                     _state.signature_algorithm.* = (try get_signature_algorithm(reader)) orelse
                                         return error.InvalidSignatureAlgorithm;
@@ -581,7 +579,6 @@ pub const ClientCertificateChain = struct {
                         struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
-
                                 _state.modulus.* = (try asn1.der.parse_int_with_length(
                                     _state.allocator,
                                     length,
@@ -593,7 +590,6 @@ pub const ClientCertificateChain = struct {
                         struct {
                             fn capture(_state: anytype, tag: u8, length: usize, reader: anytype) !void {
                                 _ = tag;
-
                                 _state.exponent.* = (try asn1.der.parse_int_with_length(
                                     _state.allocator,
                                     length,
@@ -623,14 +619,14 @@ pub const ClientCertificateChain = struct {
         std.debug.assert(cert_issuer_dns.items.len == raw_certs.items.len);
         return @This(){
             .cert_len = raw_certs.items.len,
-            .raw_certs = raw_certs.toOwnedSlice(allocator).ptr,
-            .cert_issuer_dns = cert_issuer_dns.toOwnedSlice().ptr,
+            .raw_certs = (try raw_certs.toOwnedSlice(allocator)).ptr,
+            .cert_issuer_dns = (try cert_issuer_dns.toOwnedSlice()).ptr,
             .signature_algorithm = signature_algorithm,
             .private_key = private_key.?,
         };
     }
 
-    pub fn deinit(self: *@This(), allocator: *Allocator) void {
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
         for (self.raw_certs[0..self.cert_len]) |cert_bytes| {
             allocator.free(cert_bytes);
         }
@@ -646,7 +642,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
         fn f(it: *PEMSectionIterator(Reader, options), buf: []u8) Error!usize {
             var out_idx: usize = 0;
             if (it.waiting_chars_len > 0) {
-                const rest_written = std.math.min(it.waiting_chars_len, buf.len);
+                const rest_written = @min(it.waiting_chars_len, buf.len);
                 while (out_idx < rest_written) : (out_idx += 1) {
                     buf[out_idx] = it.waiting_chars[out_idx];
                 }
@@ -695,7 +691,9 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                 if (base64_idx == base64_buf.len) {
                     base64_idx = 0;
 
-                    const out_len = std.base64.standard_decoder.calcSizeForSlice(&base64_buf) catch
+                    const standard_decoder = std.base64.standard.Decoder;
+
+                    const out_len = standard_decoder.calcSizeForSlice(&base64_buf) catch
                         return error.MalformedPEM;
 
                     const rest_chars = if (out_len > buf.len - out_idx)
@@ -705,7 +703,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
                     const buf_chars = out_len - rest_chars;
 
                     var res_buffer: [3]u8 = undefined;
-                    std.base64.standard_decoder.decode(res_buffer[0..out_len], &base64_buf) catch
+                    standard_decoder.decode(res_buffer[0..out_len], &base64_buf) catch
                         return error.MalformedPEM;
 
                     var i: u3 = 0;
@@ -716,7 +714,7 @@ fn PEMSectionReader(comptime Reader: type, comptime options: PEMSectionIteratorO
 
                     if (rest_chars > 0) {
                         mem.copy(u8, &it.waiting_chars, res_buffer[i..]);
-                        it.waiting_chars_len = @intCast(u2, rest_chars);
+                        it.waiting_chars_len = @intCast(rest_chars);
                     }
                     if (out_idx == buf.len)
                         return out_idx;
@@ -740,10 +738,10 @@ const PEMSectionIteratorOptions = struct {
 fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIteratorOptions) type {
     var biggest_name_len = 0;
 
-    var fields: [options.section_names.len + 2]std.builtin.TypeInfo.EnumField = undefined;
+    var fields: [options.section_names.len + 2]std.builtin.Type.EnumField = undefined;
     fields[0] = .{ .name = "none", .value = 0 };
     fields[1] = .{ .name = "other", .value = 1 };
-    for (fields[2..]) |*field, idx| {
+    for (fields[2..], 0..) |*field, idx| {
         field.name = options.section_names[idx];
         field.value = @as(u8, idx + 2);
         if (field.name.len > biggest_name_len)
@@ -752,7 +750,6 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
 
     const StateEnum = @Type(.{
         .Enum = .{
-            .layout = .Auto,
             .tag_type = u8,
             .fields = &fields,
             .decls = &.{},
@@ -807,9 +804,9 @@ fn PEMSectionIterator(comptime Reader: type, comptime options: PEMSectionIterato
                                         '-' => {
                                             try self.reader.skipUntilDelimiterOrEof('\n');
                                             const name = name_buf[0..name_char_idx];
-                                            for (options.section_names) |sec_name, idx| {
+                                            for (options.section_names, 0..) |sec_name, idx| {
                                                 if (mem.eql(u8, sec_name, name)) {
-                                                    self.state = @intToEnum(StateEnum, @intCast(u8, idx + 2));
+                                                    self.state = @enumFromInt(idx + 2);
                                                     return StateAndName{
                                                         .reader = .{ .context = self },
                                                         .state = self.state,
