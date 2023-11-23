@@ -34,21 +34,21 @@ pub const suites = struct {
         pub fn init_state(_: [0]u8, server_seq: u64, key_data: anytype, header: RecordHeader) State {
             const len = header.len() - 16;
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
-            mem.writeIntBig(u64, nonce[4..12], server_seq);
+            mem.writeInt(u64, nonce[4..12], server_seq, .big);
             for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.server_iv(@This())[i];
             }
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], server_seq);
+            mem.writeInt(u64, additional_data[0..8], server_seq, .big);
             additional_data[8..11].* = header.data[0..3].*;
-            mem.writeIntBig(u16, additional_data[11..13], len);
+            mem.writeInt(u16, additional_data[11..13], len, .big);
 
             var c: [4]u32 = undefined;
             c[0] = 1;
-            c[1] = mem.readIntLittle(u32, nonce[0..4]);
-            c[2] = mem.readIntLittle(u32, nonce[4..8]);
-            c[3] = mem.readIntLittle(u32, nonce[8..12]);
+            c[1] = mem.readInt(u32, nonce[0..4], .little);
+            c[2] = mem.readInt(u32, nonce[4..8], .little);
+            c[3] = mem.readInt(u32, nonce[8..12], .little);
             const server_key = crypto.keyToWords(key_data.server_key(@This()).*);
 
             return .{
@@ -103,18 +103,18 @@ pub const suites = struct {
 
             std.debug.assert(buffer.len <= buffer_size);
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @as(u16, @intCast(buffer.len + 16)));
+            try writer.writeInt(u16, @as(u16, @intCast(buffer.len + 16)), .big);
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], seq);
+            mem.writeInt(u64, additional_data[0..8], seq, .big);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)));
+            mem.writeInt(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)), .big);
 
             var encrypted_data: [buffer_size]u8 = undefined;
             var tag_data: [16]u8 = undefined;
 
             var nonce: [12]u8 = ([1]u8{0} ** 4) ++ ([1]u8{undefined} ** 8);
-            mem.writeIntBig(u64, nonce[4..12], seq);
+            mem.writeInt(u64, nonce[4..12], seq, .big);
             for (&nonce, 0..) |*n, i| {
                 n.* ^= key_data.client_iv(@This())[i];
             }
@@ -189,11 +189,11 @@ pub const suites = struct {
 
             var j: [16]u8 = undefined;
             mem.copy(u8, j[0..12], iv[0..]);
-            mem.writeIntBig(u32, j[12..][0..4], 2);
+            mem.writeInt(u32, j[12..][0..4], 2, .big);
 
             return .{
                 .aes = Aes.initEnc(key_data.server_key(@This()).*),
-                .counterInt = mem.readInt(u128, &j, .Big),
+                .counterInt = mem.readInt(u128, &j, .big),
             };
         }
 
@@ -217,7 +217,7 @@ pub const suites = struct {
                 encrypted,
                 &state.counterInt,
                 idx,
-                .Big,
+                .big,
             );
         }
 
@@ -276,12 +276,12 @@ pub const suites = struct {
             rand.bytes(iv[4..12]);
 
             var additional_data: [13]u8 = undefined;
-            mem.writeIntBig(u64, additional_data[0..8], seq);
+            mem.writeInt(u64, additional_data[0..8], seq, .big);
             additional_data[8..11].* = prefix;
-            mem.writeIntBig(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)));
+            mem.writeInt(u16, additional_data[11..13], @as(u16, @intCast(buffer.len)), .big);
 
             try writer.writeAll(&prefix);
-            try writer.writeIntBig(u16, @as(u16, @intCast(buffer.len + 24)));
+            try writer.writeInt(u16, @as(u16, @intCast(buffer.len + 24)), .big);
             try writer.writeAll(iv[4..12]);
 
             var encrypted_data: [buffer_size]u8 = undefined;
@@ -308,9 +308,6 @@ fn key_field_width(comptime T: type, comptime field: anytype) ?usize {
         return null;
 
     const field_info = std.meta.fieldInfo(T, field);
-    if (!comptime std.meta.trait.is(.Array)(field_info.type) or std.meta.Elem(field_info.type) != u8)
-        @compileError("Field '" ++ field ++ "' of type '" ++ @typeName(T) ++ "' should be an array of u8.");
-
     return @typeInfo(field_info.type).Array.len;
 }
 

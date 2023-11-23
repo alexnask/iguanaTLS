@@ -16,7 +16,7 @@ pub fn build(b: *Builder) void {
         .root_source_file = .{ .path = "src/main.zig" },
         .optimize = mode,
     });
-    main_tests.main_pkg_path = .{ .path = "." };
+    main_tests.main_mod_path = .{ .path = "." };
 
     const test_step = b.step("test", "Run library tests");
     const test_run = b.addRunArtifact(main_tests);

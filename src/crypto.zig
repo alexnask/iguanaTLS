@@ -12,10 +12,10 @@ pub const ChaCha20Stream = struct {
     pub fn initContext(key: [8]u32, d: [4]u32) BlockVec {
         const c = "expand 32-byte k";
         const constant_le = comptime [4]u32{
-            mem.readIntLittle(u32, c[0..4]),
-            mem.readIntLittle(u32, c[4..8]),
-            mem.readIntLittle(u32, c[8..12]),
-            mem.readIntLittle(u32, c[12..16]),
+            mem.readInt(u32, c[0..4], .little),
+            mem.readInt(u32, c[4..8], .little),
+            mem.readInt(u32, c[8..12], .little),
+            mem.readInt(u32, c[12..16], .little),
         };
         return BlockVec{
             constant_le[0], constant_le[1], constant_le[2], constant_le[3],
@@ -73,10 +73,10 @@ pub const ChaCha20Stream = struct {
     inline fn hashToBytes(out: *[64]u8, x: BlockVec) void {
         var i: usize = 0;
         while (i < 4) : (i += 1) {
-            mem.writeIntLittle(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0]);
-            mem.writeIntLittle(u32, out[16 * i + 4 ..][0..4], x[i * 4 + 1]);
-            mem.writeIntLittle(u32, out[16 * i + 8 ..][0..4], x[i * 4 + 2]);
-            mem.writeIntLittle(u32, out[16 * i + 12 ..][0..4], x[i * 4 + 3]);
+            mem.writeInt(u32, out[16 * i + 0 ..][0..4], x[i * 4 + 0], .little);
+            mem.writeInt(u32, out[16 * i + 4 ..][0..4], x[i * 4 + 1], .little);
+            mem.writeInt(u32, out[16 * i + 8 ..][0..4], x[i * 4 + 2], .little);
+            mem.writeInt(u32, out[16 * i + 12 ..][0..4], x[i * 4 + 3], .little);
         }
     }
 
@@ -105,8 +105,8 @@ pub const ChaCha20Stream = struct {
             mac.update(zeros[0..padding]);
         }
         var lens: [16]u8 = undefined;
-        mem.writeIntLittle(u64, lens[0..8], 13);
-        mem.writeIntLittle(u64, lens[8..16], len);
+        mem.writeInt(u64, lens[0..8], 13, .little);
+        mem.writeInt(u64, lens[8..16], len, .little);
         mac.update(lens[0..]);
         var computedTag: [16]u8 = undefined;
         mac.final(computedTag[0..]);
@@ -149,7 +149,7 @@ pub fn keyToWords(key: [32]u8) [8]u32 {
     var k: [8]u32 = undefined;
     var i: usize = 0;
     while (i < 8) : (i += 1) {
-        k[i] = mem.readIntLittle(u32, key[i * 4 ..][0..4]);
+        k[i] = mem.readInt(u32, key[i * 4 ..][0..4], .little);
     }
     return k;
 }
@@ -349,7 +349,7 @@ pub const ecc = struct {
         k: []const u8,
     ) ![Curve.point_len]u8 {
         var P: Jacobian(Curve) = undefined;
-        var res: u32 = decode_to_jacobian(Curve, &P, point);
+        const res: u32 = decode_to_jacobian(Curve, &P, point);
         point_mul(Curve, &P, k);
         var out: [Curve.point_len]u8 = undefined;
         encode_from_jacobian(Curve, &out, P);
@@ -880,7 +880,7 @@ pub const ecc = struct {
                 if (len >= 4) {
                     buf -= 4;
                     len -= 4;
-                    mem.writeIntBig(u32, @as([*]u8, @ptrFromInt(buf))[0..4], z);
+                    mem.writeInt(u32, @as([*]u8, @ptrFromInt(buf))[0..4], z, .big);
                 } else {
                     switch (len) {
                         3 => {
