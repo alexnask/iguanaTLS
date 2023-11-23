@@ -4,6 +4,10 @@ const Builder = std.build.Builder;
 pub fn build(b: *Builder) void {
     const mode = b.option(std.builtin.Mode, "mode", "") orelse .Debug;
 
+    _ = b.addModule("iguanaTLS", .{
+        .source_file = .{ .path = "src/main.zig" },
+    });
+
     const lib = b.addStaticLibrary(.{
         .name = "iguanaTLS",
         .root_source_file = .{ .path = "src/main.zig" },
